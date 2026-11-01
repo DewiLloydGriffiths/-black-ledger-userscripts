@@ -1,0 +1,23 @@
+{
+  "source_commit": "5bd61a16312c69977f2520624d7b236a7f247ef3",
+  "scripts": [
+    {
+      "file": "manager.user.js",
+      "greasyfork_id": "598010",
+      "version": "1.9.4",
+      "sha256": "54310d12409a0a7b95632140101c52b72e5b240f30385f6c1711cdf417bdcbe0"
+    },
+    {
+      "file": "smart.user.js",
+      "greasyfork_id": "596802",
+      "version": "3.1.25",
+      "sha256": "2b212d9efe738dcdefdd67f57d7712ad6d415388c5dbf036d8d6131a5441d482"
+    },
+    {
+      "file": "message-helper.user.js",
+      "greasyfork_id": "599035",
+      "version": "1.8.25",
+      "sha256": "f9c7ec36239a25ecbf0b9b6ed607f21185525a2f948a69f415d12370732b6b21"
+    }
+  ]
+}
