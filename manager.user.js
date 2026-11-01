@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.5
+// @version      1.9.6
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -3007,15 +3007,23 @@
   }
 
   function plannerConveyorAssign(members,slots,prefs,readiness=new Map(),prior=new Map()) {
-    // First pass: cover each urgent next join before filling queued vacancies.
+    // Cover each next join, optionally adding one timely follow-on per OC.
     // An invitation is conditional coverage, not an actual join.
-    const counts=new Map(),keys=new Set();
-    for(const fit of prior.values()){counts.set(String(fit.crimeId),(counts.get(String(fit.crimeId))||0)+1);keys.add(fit.key);}
+    const counts=new Map(),keys=new Set(),anchors=new Map();
+    for(const fit of prior.values()){counts.set(String(fit.crimeId),(counts.get(String(fit.crimeId))||0)+1);keys.add(fit.key);if(fit.startable && Number.isFinite(fit.planningStartAt))anchors.set(String(fit.crimeId),fit.planningStartAt);}
     const groups=new Map();
-    for(const slot of slots){
+    for(let slot of slots){
       if(keys.has(slot.key) || slot.openingUnsupported)continue;
       const crime=String(slot.crimeId),ordinary=slot.startable || Number.isFinite(slot.stallAt) || slot.expiresKnown===false;
-      if(ordinary && ((counts.get(crime)||0)>0 || (!slot.startable && Number.isFinite(slot.stallAt) && slot.stallAt>(prefs.asOf || Date.now())+24*3600000)))continue;
+      const count=counts.get(crime)||0;
+      if(prefs.conveyorFollowOn && ordinary){
+        // At most a starter/next-join pair is planned, never a complete queue.
+        if(count>=2 || (slot.startable && !anchors.has(crime)))continue;
+        const original=anchors.has(crime)?{...slot,planningStartAt:anchors.get(crime)}:slot;
+        const stageAt=plannerStagedDeadline(original,count,prefs.asOf);
+        if(!Number.isFinite(stageAt))continue;
+        slot={...slot,startable:false,stallAt:stageAt,expiresKnown:true,planningStartAt:anchors.get(crime)};
+      }else if(ordinary && (count>0 || (!slot.startable && Number.isFinite(slot.stallAt) && slot.stallAt>(prefs.asOf || Date.now())+24*3600000)))continue;
       const groupKey=ordinary?'coverage:'+crime:slot.key;
       if(!groups.has(groupKey))groups.set(groupKey,[]);groups.get(groupKey).push(slot);
     }
@@ -3024,7 +3032,13 @@
       const list=[];
       for(const member of members){
         const id=String(member.id);if(prior.has(id))continue;
-        const options=alternatives.filter(slot=>!readiness.has(id) || slot.startable || (slot.expiresKnown!==false && plannerStagedDeadline(slot,0,prefs.asOf)>readiness.get(id))).map(slot=>plannerFit(id,slot,prefs)).filter(Boolean).sort(plannerOrder);
+        const options=alternatives.filter(slot=>{
+          const stageAt=plannerStagedDeadline(slot,0,prefs.asOf);
+          if(!readiness.has(id))return !prefs.conveyorFollowOn || stageAt<=(prefs.asOf || Date.now())+24*3600000;
+          const ready=readiness.get(id);
+          return (slot.startable || slot.expiresKnown!==false && (Number.isFinite(slot.stallAt)?stageAt>=ready:stageAt>ready)) &&
+            (!Number.isFinite(prefs.maxQueueWaitHours) || stageAt-ready<=prefs.maxQueueWaitHours*3600000);
+        }).map(slot=>plannerFit(id,slot,prefs)).filter(Boolean).sort(plannerOrder);
         if(options[0])list.push({id,fit:options[0],group:key});
       }
       candidates.set(key,list);
@@ -3034,7 +3048,7 @@
     const owner=new Map();
     function place(key,seen){for(const row of candidates.get(key) || []){if(seen.has(row.id))continue;seen.add(row.id);const old=owner.get(row.id);if(!old || place(old.group,seen)){owner.set(row.id,row);return true;}}return false;}
     for(const [key] of [...groups].sort((a,b)=>{const x=a[1][0],y=b[1][0];return Number(!!x.opening)-Number(!!y.opening) || (x.opening && y.opening?(y.continuationRatio || 0)-(x.continuationRatio || 0):0) || (prefs.urgentFirst?(Number.isFinite(x.stallAt)?x.stallAt:x.expiresAt)-(Number.isFinite(y.stallAt)?y.stallAt:y.expiresAt):0) || y.level-x.level || plannerOrder({...x,margin:0},{...y,margin:0});}))place(key,new Set());
-    return new Map([...owner].map(([id,row])=>[id,{...row.fit,joinByAt:row.fit.startable?(readiness.get(id) || prefs.asOf):plannerStagedDeadline(row.fit,0,prefs.asOf),planningStartAt:row.fit.startable?(readiness.get(id) || prefs.asOf):undefined,conditionalPlanning:Number.isFinite(row.fit.stallAt)}]));
+    return new Map([...owner].map(([id,row])=>[id,{...row.fit,joinByAt:row.fit.startable?(readiness.get(id) || prefs.asOf):plannerStagedDeadline(row.fit,0,prefs.asOf),planningStartAt:row.fit.startable?(readiness.get(id) || prefs.asOf):row.fit.planningStartAt,conditionalPlanning:Number.isFinite(row.fit.stallAt)}]));
   }
 
   function plannerSpawnCrew(members, slots, fits, breadth, preferredIds = new Set()) {
@@ -3091,7 +3105,7 @@
     }
     const roles=Object.entries(def.roles);
     if(roles.length>16)return {assigned:new Map(),schedule:[],complete:false,nextDeadline:0,unsupported:true};
-    const required=roles.length;
+    const required=Math.min(2,roles.length);
     const preferFuture=prefs.preferFutureFollower===true;
     function compareCrew(a,b){
       const uncertain=crew=>crew.filter(r=>r.fit.kind==='Estimated' || r.fit.kind==='Recorded high' || !r.fit.seen || r.fit.stale).length;
@@ -3150,7 +3164,7 @@
       const high=plannerPreparation(remaining,future,defs,{...prefs,spawnBrackets:true,levels:plannerSelectedLevels(prefs).filter(l=>l>=7)});
       const lower=plannerPreparation(remaining.filter(m=>!protectedHigh.has(String(m.id))),future.map(h=>({...h,members:h.members.filter(m=>!protectedHigh.has(String(m.id)))})),defs,{...prefs,spawnBrackets:true,levels:plannerSelectedLevels(prefs).filter(l=>l<7)});
       const options=[...high.levels,...lower.levels].map(l=>{const low=l.level<7;const current=low?remaining.filter(m=>!protectedHigh.has(String(m.id))):remaining;const arrivals=low?future.map(h=>({...h,members:h.members.filter(m=>!protectedHigh.has(String(m.id)))})):future;const outcomes=initialOutcomes(current,arrivals,l.outcomes);return {...l,outcomes,dailyCovered:outcomes.filter(o=>o.daily.complete).length,historyWeak:(prefs.learning || []).length>0 && l.outcomes.some(o=>plannerHistoryAssessment(o.crime,prefs.learning).weak)};});
-      // Require complete distinct crew coverage for every random outcome.
+      // Require a distinct starter and next join for every random outcome.
       // Partial evidence remains visible, but cannot create another spend request.
       const viable=options.filter(l=>!(l.level>=7 && (prefs.highEndSpawnBlocked || crews.some(c=>c.level>=7))) && !prefs.spawningBlocked && l.outcomes.every(o=>o.plannedUncertain===0) && l.outcomes.length>0 && l.dailyCovered===l.outcomes.length && l.seeded>0 && !l.historyWeak && plannerScopeCost(l)<=spendable);
       const full=viable.filter(l=>l.dailyCovered===l.outcomes.length).sort((a,b)=>a.readyHours-b.readyHours || b.level-a.level)[0];
@@ -3189,7 +3203,7 @@
         unsupported:level.outcomes.filter(o=>!supported.includes(o)).map(o=>o.crime)};
     }).filter(level=>level.supported.length>0 && level.supported.length<level.outcomes.length && !level.historyWeak);
     for(const level of candidates){
-      level.decision={allowed:false,reason:'Hold spawning — this bracket has unsupported crime outcomes. Torn chooses the crime; complete crew coverage is required for every outcome.'};
+      level.decision={allowed:false,reason:'Hold spawning — this bracket has unsupported crime outcomes. Torn chooses the crime; a starter and a distinct next join are required for every outcome; later staffing is reassessed.'};
       if(!state.shared || !Number.isFinite(state.scannedAt) || Date.now()-state.scannedAt<0 || Date.now()-state.scannedAt>5*60000)
         level.decision={allowed:false,reason:'Fresh shared scan required before considering a spawn.'};
     }
@@ -3323,7 +3337,7 @@
   function plannerSpawnDecision(level,state,plan,prefs,forecast=false) {
     if(!state.shared)return {allowed:true,reason:''};
     if(plan.spawningBlocked)return {allowed:false,reason:'Hold spawning — resolve unassessed OCs or invitation conflicts before using the remaining pool.'};
-    if(!level)return {allowed:false,reason:'Hold spawning — no fully staffable level.'};
+    if(!level)return {allowed:false,reason:'Hold spawning — no supported starter / next-join pair.'};
     if(level.level>=7 && (state.crimes || []).some(c=>(Number(c.difficulty) || plan.defs?.[c.name]?.level || (typeof plannerWeights==='function'?plannerWeights()[c.name]?.level:0))===8 && ['recruiting','planning'].includes(c.status)))return {allowed:false,reason:'Hold L7–8 spawning — an L8 OC already exists. Support it first; this faction is limited to one L8 at a time. A random L7–8 spawn can create another L8.'};
     if(level.allReliable===false)return {allowed:false,reason:'Verify crew CPR before spending Scope: this level depends on estimated, stale or undated readings.'};
     if(plan.assignmentConflicts?.some(issue=>!issue.id || !plan.mailedHeld?.has(String(issue.id))))return {allowed:false,reason:'Review the assignment / spawn trade-offs first. A conflict could not be isolated to a held member.'};
@@ -3528,7 +3542,7 @@
     }
     const roster=blRoster();
     const sortRows=rows=>[...(rows || [])].sort((a,b)=>JSON.stringify(canonical(a)).localeCompare(JSON.stringify(canonical(b))));
-    return plannerReviewDigest(JSON.stringify(canonical({planningStrategy:'existing-role-placements-v19',
+    return plannerReviewDigest(JSON.stringify(canonical({planningStrategy:'rolling-conveyor-pairs-v20',
       crimes:sortRows((state.crimes || []).map(c=>({id:c.id,name:c.name,difficulty:c.difficulty,status:c.status,isExpiring:c.isExpiring,ready_at:c.ready_at,expired_at:c.expired_at,slots:c.slots}))),
       members:sortRows(state.members),profiles:sortRows(state.profiles),weights:state.weights,targetPolicy:state.targetPolicy,learning:state.learning,
       levels:plannerSelectedLevels(prefs).sort((a,b)=>a-b),includeStale:prefs.includeStale===true,
@@ -3820,28 +3834,17 @@
       const freeNow=eligible.filter(m=>!mailedHeld.has(String(m.id))),freeSoon=upcoming.filter(m=>!mailedHeld.has(String(m.id)));
       // Cover existing deadlines before considering any speculative spawn crew.
       const existingNow=plannerConveyorAssign(freeNow,freeSlots,prefs,new Map(),new Map([...mailed.now,...mailed.next]));
-      const existingKeys=new Set([...existingNow.values()].map(f=>f.key));
-      const existingNext=plannerConveyorAssign(freeSoon,freeSlots.filter(s=>!existingKeys.has(s.key)),prefs,readiness,new Map([...mailed.now,...mailed.next,...existingNow]));
+      const initial=new Map([...mailed.now,...mailed.next,...existingNow]);
+      // Prefer a member finishing another OC over putting a second free person
+      // in this queue. Only the next follow-on is forecast, with <=24h waiting.
+      const existingNext=plannerConveyorAssign(freeSoon,active.open,{...prefs,conveyorFollowOn:true,maxQueueWaitHours:24},readiness,initial);
       now=new Map([...mailed.now,...existingNow]);next=new Map([...mailed.next,...existingNext]);
-      // Urgent next joins retain priority. Then put remaining free members into
-      // suitable vacancies now, even when their own planning stage is days away.
-      const committedNow=new Map([...now,...next]);
-      const committedNowKeys=new Set([...committedNow.values()].map(f=>f.key));
-      const queueNow=plannerAssignStaged(freeNow.filter(m=>!committedNow.has(String(m.id))),
-        active.open.filter(s=>!committedNowKeys.has(s.key) && !s.openingUnsupported &&
-          (!s.opening || [...committedNow.values()].some(f=>String(f.crimeId)===String(s.crimeId)))),
-        {...prefs,capabilityFirst:true},new Map(),committedNow);
-      for(const [id,fit] of queueNow)now.set(id,{...fit,joinNowQueued:true});
-      for(let i=deferred.length-1;i>=0;i--)if([...queueNow.values()].some(f=>f.key===deferred[i].key))deferred.splice(i,1);
-      // Assess arrival-relative waiting after urgent joins and current placements.
-      // A stage beyond tomorrow can still be a sensible match for a later arrival.
-      const priorFuture=new Map([...now,...next]);
-      const priorFutureKeys=new Set([...priorFuture.values()].map(f=>f.key));
-      const queuedFuture=plannerAssignStaged(freeSoon.filter(m=>!priorFuture.has(String(m.id))),
-        active.open.filter(s=>!priorFutureKeys.has(s.key) && !s.openingUnsupported &&
-          (!s.opening || [...priorFuture.values()].some(f=>String(f.crimeId)===String(s.crimeId)))),
-        {...prefs,capabilityFirst:true,maxQueueWaitHours:36},readiness,priorFuture);
-      for(const [id,fit] of queuedFuture)next.set(id,fit);
+      const committedPair=new Map([...now,...next]);
+      // If no forecast follower covers an empty start, add one current follower.
+      // Occupied OCs get only their next join now; keep later roles for finishers.
+      const openingFollowers=plannerConveyorAssign(freeNow.filter(m=>!committedPair.has(String(m.id))),
+        active.open.filter(slot=>slot.opening),{...prefs,conveyorFollowOn:true},new Map(),committedPair);
+      for(const [id,fit] of openingFollowers)now.set(id,fit);
       // Report remaining crew risk after real recommendations; this assessment
       // must not veto placements or bind members to a speculative full crew.
       active.completion=plannerCompletionAssessment(state,defs,[...eligible,...upcoming],prefs,readiness,new Map([...now,...next]),mailedHeld,active.open);
@@ -3862,11 +3865,9 @@
       within24:upcoming.filter(m=>{const t=active.soon.get(String(m.id)).readyAt;return t>cutoff12&&t<=cutoff24;}),
       within48:upcoming.filter(m=>active.soon.get(String(m.id)).readyAt>cutoff24)
     };
-    // Remaining coverage reservations are for future arrivals; suitable free members are assigned above.
+    // Near-term followers are explicit assignments. No hidden multi-day holds.
     const committed=new Map([...now,...next]);
-    const committedKeys=new Set([...committed.values()].map(f=>f.key));
-    const coverageReservations=plannerAssignStaged(upcoming.filter(m=>!mailedHeld.has(String(m.id)) && !committed.has(String(m.id))),active.open.filter(s=>!committedKeys.has(s.key) && !s.openingUnsupported && (!s.opening || [...committed.values()].some(f=>String(f.crimeId)===String(s.crimeId)))),prefs,readiness,committed);
-    for(const [id,fit] of coverageReservations)if(readiness.has(id) && (!Number.isFinite(fit.joinByAt) || fit.joinByAt>asOf+24*3600000))coverageReservations.delete(id);
+    const coverageReservations=new Map();
     const coveredKeys=new Set([...committed.values(),...coverageReservations.values()].map(f=>f.key));
     const staffingRisks=active.open.filter(s=>!coveredKeys.has(s.key));
     const unassessedExisting=state.crimes.filter(c=>c.status==='recruiting' && c.slots?.some(s=>s.user===null) && (!plannerManagedLevel(c.difficulty,prefs) || !plannerDefinition(c.name,defs)));
@@ -4970,7 +4971,7 @@
         const deferredKeys=new Set((plan.deferred || []).map(s=>s.key));
         const matching=(plan.active.open || []).filter(s=>plannerFit(String(member.id),s,prefs));
         const deferredFits=matching.filter(s=>deferredKeys.has(s.key));
-        const allocationNote=plan.mailedHeld?.has(String(member.id))?'An existing sent invitation reserves this member. Review that invitation before assigning elsewhere.':deferredFits.length && deferredFits.length===matching.length?'Qualifying existing roles are deferred: '+[...new Set(deferredFits.map(s=>s.crime+' — '+prettyRole(s.role)))].join('; ')+'. These roles are deferred or conditionally covered; review arrival-to-stage waiting and existing commitments.':matching.length?'A qualifying vacancy exists but has no allocation for this member. Review reservations and planned stage coverage.':'No recorded exact-role CPR qualifies for a currently needed, assessed vacancy. The highest known level shown above refers to other recorded roles.';
+        const allocationNote=plan.mailedHeld?.has(String(member.id))?'An existing sent invitation reserves this member. Review that invitation before assigning elsewhere.':deferredFits.length && deferredFits.length===matching.length?'Qualifying existing roles are deferred: '+[...new Set(deferredFits.map(s=>s.crime+' — '+prettyRole(s.role)))].join('; ')+'. Keep these later conveyor slots open for future finishers; next joins are covered conditionally or are not due yet.':matching.length?'A qualifying vacancy exists but has no allocation for this member. Review reservations and planned stage coverage.':'No recorded exact-role CPR qualifies for a currently needed, assessed vacancy. The highest known level shown above refers to other recorded roles.';
         return `<div class="blom-placement-title">Highest known qualifying level: L${best.level}</div>
           <div class="blom-placement-meta">${escapeHtml(best.crime)} · ${escapeHtml(prettyRole(best.role))}</div>
           <div class="blom-placement-meta"><strong>${formatCpr(best.cpr)} CPR</strong> · target ${best.target}% · ${best.kind} · confidence ${best.confidence}</div>
@@ -4984,7 +4985,7 @@
         ${plannerState.source?' · Check member status and slot availability on Torn':''}
         ${fit.expiresKnown===false?' · Slot expiry unknown; available-now suggestion only':''}</div>
         ${fit.startable?`<div class="blom-placement-note">Start this unstarted OC when available. Follow-on stages depend on that first join; later staffing remains conditional.</div>`:''}
-        ${!fit.startable && fit.conditionalPlanning && Number.isFinite(fit.joinByAt)?`<div class="blom-placement-note">Join now if available; waiting in the OC planning queue is allowed. Latest planned join: ${escapeHtml(new Date(fit.joinByAt).toLocaleString('en-GB',{timeZone:'Europe/London',hour12:false}))}. Depends on earlier planned joins happening; rescan after each join.</div>`:''}
+        ${!fit.startable && fit.conditionalPlanning && Number.isFinite(fit.joinByAt)?`<div class="blom-placement-note">Next conveyor join; future-assignment members must finish their current OC first. Latest planned join: ${escapeHtml(new Date(fit.joinByAt).toLocaleString('en-GB',{timeZone:'Europe/London',hour12:false}))}. Depends on earlier planned joins happening; rescan after each join.</div>`:''}
         ${Number.isFinite(fit.queueWaitHours)?`<div class="blom-placement-note">Expected queue wait after becoming available: ${fit.queueWaitHours.toFixed(1)} hours. Stage timing is conditional on earlier joins.</div>`:''}
         ${fit.itemId?`<div class="blom-placement-note blom-item-warning">Check required item #${escapeHtml(fit.itemId)}</div>`:''}`;
     }
@@ -5050,14 +5051,14 @@
         if(!placement)continue;
         options.push(`<div class="blom-placement-meta">Possible new OC: L${outcome.level} · ${escapeHtml(outcome.crime)} · ${escapeHtml(prettyRole(placement.fit.role))} · ${formatCpr(placement.fit.cpr)} CPR / ${placement.fit.target}% target</div>`);
       }
-      return existing.join('')+`<div class="blom-placement-note">${options.length?'Possible roles in a new OC with conditional complete-crew coverage. Review the spawn assessment for Scope, capacity and unsupported outcomes before spawning. Torn chooses the crime; scan the actual outcome before assigning.':'No supported new-OC role found with complete qualifying crew coverage in the selected spawn brackets. Review exact-role CPR, selected levels and the spawn assessment blockers.'}</div>${options.join('')}`;
+      return existing.join('')+`<div class="blom-placement-note">${options.length?'Possible starter / next-join roles for a new OC; later roles remain unresolved. Review the spawn assessment for Scope, capacity and unsupported outcomes before spawning. Torn chooses the crime; scan the actual outcome before assigning.':'No supported starter / next-join role found in the selected spawn brackets. Review exact-role CPR, selected levels and the spawn assessment blockers.'}</div>${options.join('')}`;
     }
     function preparationSection() {
       const levels=[...preparation.levels].sort((a,b)=>a.level-b.level);
       const quantities=new Map(needed.groups.map(g=>[g.level,g]));
       const rows=levels.map(l=>{
         const quantity=quantities.get(l.level),plans=needed.crews.filter(c=>c.level===l.level);
-        const assessment=needed.highEndHold && l.level>=7?'Hold — one L8 at a time':plan.spawningBlocked?'Hold — existing OCs need attention':l.historyWeak?'Hold — weak history':l.seeded===0?'Wait — no qualifying starter now':l.seeded<l.outcomes.length?`Hold spawning — starters cover only ${l.seeded}/${l.outcomes.length} outcomes`:l.dailyCovered===l.outcomes.length?(l.outcomes.some(o=>o.plannedUncertain)?'Complete crew supported · verify CPR':'Complete crew supported'):'Hold spawning — complete crew not covered for every outcome';
+        const assessment=needed.highEndHold && l.level>=7?'Hold — one L8 at a time':plan.spawningBlocked?'Hold — existing OCs need attention':l.historyWeak?'Hold — weak history':l.seeded===0?'Wait — no qualifying starter now':l.seeded<l.outcomes.length?`Hold spawning — starters cover only ${l.seeded}/${l.outcomes.length} outcomes`:l.dailyCovered===l.outcomes.length?(l.outcomes.some(o=>o.plannedUncertain)?'Starter + next join supported · verify CPR':'Starter + next join supported'):'Hold spawning — starter + next join not covered for every outcome';
         const outcomeDetails=outcomes=>outcomes.map(o=>`<div style="padding:8px 0;border-top:1px solid #344650"><strong>${escapeHtml(o.crime)}</strong> · ${o.filled}/${o.total} roles now · ${o.daily.complete?'Crew of '+o.daily.required+' stage'+(o.daily.required===1?'':'s')+' supported':`Next unfilled deadline: +${o.daily.nextDeadline}h`} · ${o.daily.remainingRoles} later roles unresolved${o.missing.length?` · gaps now: ${o.missing.map(prettyRole).map(escapeHtml).join(', ')}`:''}${[...o.plannedCrew].map(([id,fit])=>{const member=[...unusedNow,...unusedSoon].find(m=>String(m.id)===id),soon=plan.active.soon.get(id);return `<div class="blom-placement-meta">${escapeHtml(prettyRole(fit.role))} · ${escapeHtml(member?.name || id)} · ${unusedNow.some(m=>String(m.id)===id)?'Available now':soon?'Expected free in '+escapeHtml(plannerTime(soon.readyAt)):'Future availability unknown'} · join by +${o.daily.schedule.find(row=>row.id===String(id))?.joinByHours ?? '?'}h · ${formatCpr(fit.cpr)} CPR / target ${fit.target}%</div>`;}).join('')}${l.level>=7?`<div class="blom-placement-note">${o.plannedRobust?'Backup crew available':'No confirmed backup crew'}</div>`:''}${o.plannedUncertain?'<div class="blom-spawn-warning">Verify CPR: estimated, stale or undated readings.</div>':''}</div>`).join('');
         return `<tr><td><strong>${plannerSpawnLabel(l)}</strong></td><td><strong>${quantity?'× '+quantity.count:'—'}</strong>${quantity?.partial?`<div class="blom-placement-note">${quantity.partial} conditional</div>`:''}${plans.length?`<details data-bl-disclosure-key="spawn-${l.level}-starters"><summary>Planned starters</summary>${plans.map(c=>{const m=unusedNow.find(m=>String(m.id)===c.starter.id);return `<div>${escapeHtml(m?.name || c.starter.id)} · ${escapeHtml(c.starter.crime)} · ${escapeHtml(prettyRole(c.starter.role))} · ${formatCpr(c.starter.cpr)} CPR</div>`;}).join('')}</details>`:''}</td><td>${plannerScopeCost(l)}</td><td>${l.seeded}/${l.outcomes.length}</td><td>${l.dailyCovered}/${l.outcomes.length}</td><td>${assessment}<details data-bl-disclosure-key="spawn-${l.level}-arrivals"><summary>Starter crews and expected arrivals</summary>${outcomeDetails(l.outcomes)}</details>${plans.length>1?`<details data-bl-disclosure-key="spawn-${l.level}-additional"><summary>Additional planned OCs (${plans.length-1})</summary>${plans.slice(1).map((c,i)=>`<strong>OC ${i+2}${c.partial?' · conditional':''}</strong>${outcomeDetails(c.outcomes)}`).join('')}</details>`:''}</td></tr>`;
       }).join('');
@@ -5065,7 +5066,7 @@
         ${needed.highEndHold?'<p class="blom-placement-note">L7–8 spawning held: an L8 already exists. Support that OC first; one L8 at a time.</p>':''}
         <details class="blom-inline-details" data-bl-disclosure-key="spawn-reservations"><summary>Existing reservations</summary><div class="blom-placement-note">${plan.available.filter(m=>plan.coverageReservations?.has(String(m.id))).length} free members and ${[...(plan.coverageReservations?.keys() || [])].filter(id=>!plan.available.some(m=>String(m.id)===id)).length} future arrivals reserved for later stages in existing OCs. These reservations are excluded from new crews.</div>${[...(plan.coverageReservations || new Map())].map(([id,fit])=>`<div class="blom-placement-note">${escapeHtml(plan.upcoming.find(m=>String(m.id)===id)?.name || id)} · L${fit.level} ${escapeHtml(fit.crime)} #${escapeHtml(fit.crimeId)} · ${escapeHtml(prettyRole(fit.role))} · conditional join by ${escapeHtml(plannerTime(fit.joinByAt))}</div>`).join('')}</details>
         ${plan.spawningBlocked?'<div class="blom-alert blom-alert-bad"><strong>Hold new spawns — unresolved checks.</strong> '+(plan.unassessedExisting.length?plan.unassessedExisting.length+' OCs need their levels or definitions checked. ':'')+'Resolve checks that cannot be isolated to held members, then rescan.</div>':plan.assignmentConflicts?.length?'<p class="blom-placement-note">'+plan.assignmentConflicts.length+' invitation issues need review. Affected members remain held out; these new-start plans use only independent spare candidates.</p>':''}
-        ${spawnOpportunity?`<div class="blom-alert blom-spawn-advice"><strong>${spawnOpportunity.decision.allowed?'Best fit to consider: one '+plannerSpawnLabel(spawnOpportunity)+' OC':'Partial coverage: '+plannerSpawnLabel(spawnOpportunity)+' — hold spawning'}</strong><p>${spawnOpportunity.supported.length}/${spawnOpportunity.outcomes.length} possible crimes have complete crew coverage. ${spawnOpportunity.ids.length} of ${unusedNow.length} spare members have initial roles across those alternatives: ${unusedNow.filter(m=>spawnOpportunity.ids.includes(String(m.id))).map(m=>escapeHtml(m.name || m.id)).join(', ')}.</p><p class="blom-spawn-warning"><strong>Risk:</strong> no verified complete crew for ${spawnOpportunity.unsupported.map(escapeHtml).join(', ')}. These counts are coverage, not odds.</p><p>${spawnOpportunity.decision.allowed?'Manual choice: spawn one, then Fresh shared scan to assign the actual roles. Stop and review if the outcome is unsupported.':escapeHtml(spawnOpportunity.decision.reason)}</p><details class="blom-inline-details" data-bl-disclosure-key="spawn-best-fit-roles"><summary>Candidate positions by possible crime</summary>${spawnOpportunity.supported.map(o=>`<p><strong>${escapeHtml(o.crime)}</strong>: ${o.daily.schedule.map(row=>{const member=[...unusedNow,...unusedSoon].find(m=>String(m.id)===String(row.id));return `${escapeHtml(member?.name || row.id)} → ${escapeHtml(prettyRole(row.fit.role))} (${formatCpr(row.fit.cpr)} CPR / ${row.fit.target}% target${unusedNow.some(m=>String(m.id)===String(row.id))?' · now':' · conditional arrival'})`;}).join('; ')}</p>`).join('')}</details></div>`:!needed.crews.length?'<p class="blom-spawn-warning">No supported spawn recommendation. Open the bracket comparison for blockers.</p>':''}
+        ${spawnOpportunity?`<div class="blom-alert blom-spawn-advice"><strong>${spawnOpportunity.decision.allowed?'Best fit to consider: one '+plannerSpawnLabel(spawnOpportunity)+' OC':'Partial coverage: '+plannerSpawnLabel(spawnOpportunity)+' — hold spawning'}</strong><p>${spawnOpportunity.supported.length}/${spawnOpportunity.outcomes.length} possible crimes have a starter and next join. ${spawnOpportunity.ids.length} of ${unusedNow.length} spare members have initial roles across those alternatives: ${unusedNow.filter(m=>spawnOpportunity.ids.includes(String(m.id))).map(m=>escapeHtml(m.name || m.id)).join(', ')}.</p><p class="blom-spawn-warning"><strong>Risk:</strong> no verified starter / next-join pair for ${spawnOpportunity.unsupported.map(escapeHtml).join(', ')}. These counts are coverage, not odds.</p><p>${spawnOpportunity.decision.allowed?'Manual choice: spawn one, then Fresh shared scan to assign the actual roles. Stop and review if the outcome is unsupported.':escapeHtml(spawnOpportunity.decision.reason)}</p><details class="blom-inline-details" data-bl-disclosure-key="spawn-best-fit-roles"><summary>Candidate positions by possible crime</summary>${spawnOpportunity.supported.map(o=>`<p><strong>${escapeHtml(o.crime)}</strong>: ${o.daily.schedule.map(row=>{const member=[...unusedNow,...unusedSoon].find(m=>String(m.id)===String(row.id));return `${escapeHtml(member?.name || row.id)} → ${escapeHtml(prettyRole(row.fit.role))} (${formatCpr(row.fit.cpr)} CPR / ${row.fit.target}% target${unusedNow.some(m=>String(m.id)===String(row.id))?' · now':' · conditional arrival'})`;}).join('; ')}</p>`).join('')}</details></div>`:!needed.crews.length?'<p class="blom-spawn-warning">No supported spawn recommendation. Open the bracket comparison for blockers.</p>':''}
         ${typeof plannerSpawnQuantityDecision==='function' && needed.crews.length?`<div class="blom-alert blom-spawn-advice">${escapeHtml(plannerSpawnQuantityDecision(needed,plannerState,plan,prefs).reason)}</div>`:''}
         <p><strong>${plan.now.size} assigned to existing OCs · ${unusedNow.length} spare now.</strong> After spawning, scan to assign the actual roles.</p>
         ${unusedNow.length?`<details class="blom-inline-details" data-bl-disclosure-key="spawn-spare-capabilities"><summary>Spare members and recorded levels (${unusedNow.length})</summary>${unusedNow.map(m=>{const capability=plannerLevelFloor(String(m.id),prefs);const options=preparation.levels.filter(l=>l.outcomes.some(o=>o.daily.schedule.some(row=>row.id===String(m.id))));return `<p><strong>${escapeHtml(m.name || m.id)}</strong> · ${capability.highest?'recorded L'+capability.highest:'level unknown'} · ${options.length?'candidate in '+options.map(plannerSpawnLabel).join(', '):'no qualifying initial role — check exact-role CPR'}</p>${plannerSimilarRoleNote(String(m.id),plan,prefs)}`;}).join('')}</details>`:''}
@@ -5075,7 +5076,7 @@
         <details class="blom-inline-details" data-bl-disclosure-key="spawn-explanation"><summary>How this assessment works</summary>
         <p class="blom-placement-note">Each row\u2019s coverage assesses the first OC from the same remaining pool; unselected rows are alternatives, not extra spawn requests. Each proposed OC requires a distinct qualifying member for every role in every possible outcome, with a starter now and verified arrivals within 24 hours. Crew coverage remains conditional until members join. Join deadlines still follow consecutive planning stages; candidates do not all need to join before the first gap. Future assignments use arrivals within 24 hours and at most 36 hours of queue waiting after release. Additional soft reservations remain limited to joins within 24 hours; longer waits remain unresolved.</p>
 
-        <p class="blom-muted">Existing sent invitations remain commitments. Available members may join suitable queued roles now. Later-stage reservations for members still in OCs remain conditional until they become free. Quantities account for complete qualifying crews; future arrivals remain conditional. Forecasts are conditional and not permission to spend Scope. Partial starter coverage is evidence only and adds zero to OCs needed. Torn may choose a crime these starters cannot join; do not keep spawning to obtain a particular crime. Spawn one, check its actual roles and rescan before the next. Future completion times may change.</p>
+        <p class="blom-muted">Existing sent invitations remain commitments. Cover the next required join, prefer timely finishers as followers, and spread other free members across supported starts. Do not fill multi-day planning queues. Quantities account for a starter and one distinct next join per OC; later roles remain unresolved and future arrivals are conditional. Forecasts are conditional and not permission to spend Scope. Partial starter coverage is evidence only and adds zero to OCs needed. Torn may choose a crime these starters cannot join; do not keep spawning to obtain a particular crime. Spawn one, check its actual roles and rescan before the next. Future completion times may change.</p>
         </details>
       </div></details></details></section>`;
     }
@@ -5129,7 +5130,7 @@
       <details class="blom-section blom-main-section" tabindex="-1" open>
         <summary><span>Optimised assignments</span><span class="blom-mini-badge blom-good">${allAssignmentGroups.length} OC${allAssignmentGroups.length===1?'':'s'}</span></summary>
         <div class="blom-section-body">
-          <div class="blom-section-intro">${plan.available.length} free now: ${plan.now.size} assigned now · ${plan.available.filter(m=>!plan.now.has(String(m.id)) && plan.coverageReservations?.has(String(m.id))).length} reserved for later stages · ${unusedNow.length} spare${plan.available.filter(m=>!plan.now.has(String(m.id)) && !plan.coverageReservations?.has(String(m.id)) && plan.mailedHeld?.has(String(m.id))).length?' · '+plan.available.filter(m=>!plan.now.has(String(m.id)) && !plan.coverageReservations?.has(String(m.id)) && plan.mailedHeld?.has(String(m.id))).length+' held for invitation review':''}. ${plan.next.size} future assignments are members still in other OCs. Messages include allocated members only; unknown/below-target CPR, selected levels, member status and protected specialists can leave members without an allocation.</div>
+          <div class="blom-section-intro">${plan.available.length} free now: ${plan.now.size} assigned now · ${plan.available.filter(m=>!plan.now.has(String(m.id)) && plan.coverageReservations?.has(String(m.id))).length} reserved for later stages · ${unusedNow.length} spare${plan.available.filter(m=>!plan.now.has(String(m.id)) && !plan.coverageReservations?.has(String(m.id)) && plan.mailedHeld?.has(String(m.id))).length?' · '+plan.available.filter(m=>!plan.now.has(String(m.id)) && !plan.coverageReservations?.has(String(m.id)) && plan.mailedHeld?.has(String(m.id))).length+' held for invitation review':''}. ${plan.next.size} future assignments are members still in other OCs. Messages include allocated members only. Later roles stay open for members finishing other OCs; spare members are assessed for parallel starts. CPR, level, status and single-L8 checks still apply.</div>
           <label>Prepare messages for <select id="blom-planner-message-scope"><option value="now" ${!messageFuture?'selected':''}>Assigned now (${plan.now.size} recipients)</option><option value="future" ${messageFuture?'selected':''}>Future assignments (${plan.next.size} recipients)</option></select></label>
           ${messageGroups.length?`<div class="blom-newsletter-card"><div class="blom-newsletter-head"><div><strong>Newsletter</strong><span>${assignedAllIds.size} ${messageFuture?'future':'assigned-now'} message recipient${assignedAllIds.size===1?'':'s'}</span></div><span class="blom-mini-badge ${nativeGroupExact?'blom-good':'blom-warn'}">${nativeGroupExact?'Native group matches':'Exact list needed'}</span></div>
           <div class="blom-newsletter-note">${nativeGroupExact?`All ${availableIds.size} scanned available members have assignments. Recheck Torn\u2019s current recipient list before using its Not in an Organized Crime filter.`:`The scanned available-now list (${availableIds.size}) ${nativeExtra?`contains ${nativeExtra} extra member${nativeExtra===1?'':'s'}`:'does not include future-assignment members'}. For an exact send, use the copied recipient list rather than trusting that native filter.`}</div>
@@ -7470,7 +7471,7 @@
         </details>
         <details><summary><strong>Everyday use</strong></summary>
           <ul>
-            <li><b>Roster Planner:</b> scan before allocating members. Suggestions use the shared snapshot: available members, all current OCs, server CPR, role weights, targets and selected crime levels. Prepare new OCs shows starters available now, forecast arrivals and staffing gaps; complete crew assessments show when all roles can be filled. Known finish times support the 24-hour forecast; paused or unreadable timers remain unknown. Planning coverage shows the next uncovered stage; successive on-time joins extend coverage by 24 hours. Recommendations are conditional until members join. Existing stall deadlines take priority over crime level and new spawns. Urgent existing stages due within 24 hours may use higher-level specialists with qualifying role CPR. Stalled OCs remain fillable, while true expiring OCs retain their expiry limit. CPR targets remain required. Set the spawn Scope budget using the live faction Scope balance and actual level costs; the default reserve is 50 Scope. Staffing is shown separately from spending advice. Shared completed-outcome evidence flags consistently weak options once sufficient observations exist; it does not predict this crew\u2019s success or change CPR targets. Rescan after changes; shared snapshots expire after five minutes and are checked for updates every five seconds while Torn is focused.</li>
+            <li><b>Roster Planner:</b> scan before allocating members. Suggestions use the shared snapshot: available members, all current OCs, server CPR, role weights, targets and selected crime levels. Prepare new OCs checks a starter and one distinct timely follower for every possible crime. Later roles stay open for members finishing other OCs. Whole-crew coverage is advisory; do not fill multi-day queues. Known finish times support the 24-hour forecast; paused or unreadable timers remain unknown. Planning coverage shows the next uncovered stage; successive on-time joins extend coverage by 24 hours. Recommendations are conditional until members join. Existing stall deadlines take priority over crime level and new spawns. Urgent existing stages due within 24 hours may use higher-level specialists with qualifying role CPR. Stalled OCs remain fillable, while true expiring OCs retain their expiry limit. CPR targets remain required. Set the spawn Scope budget using the live faction Scope balance and actual level costs; the default reserve is 50 Scope. Staffing is shown separately from spending advice. Shared completed-outcome evidence flags consistently weak options once sufficient observations exist; it does not predict this crew\u2019s success or change CPR targets. Rescan after changes; shared snapshots expire after five minutes and are checked for updates every five seconds while Torn is focused.</li>
             <li><b>OC Builder:</b> tick levels, choose a crime, then review the proposed unique-member team. Teams build automatically when you choose a crime. Role targets follow Smart Role Targets and adjust for role weight.</li>
             <li><b>Specialists:</b> tick levels and choose a crime to see the top recorded members for each role.</li>
             <li><b>Coverage:</b> tick levels to see which roles have qualifying members and where backup is thin.</li>
