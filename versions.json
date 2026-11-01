@@ -1,11 +1,11 @@
 {
-  "source_commit": "5bd61a16312c69977f2520624d7b236a7f247ef3",
+  "source_commit": "c6beaf91b1285607f128e5ae8d8f56659a45025b",
   "scripts": [
     {
       "file": "manager.user.js",
       "greasyfork_id": "598010",
-      "version": "1.9.4",
-      "sha256": "54310d12409a0a7b95632140101c52b72e5b240f30385f6c1711cdf417bdcbe0"
+      "version": "1.9.5",
+      "sha256": "ae084456bb2b7a3fb53e8c5114cc33d01c6f42b7917193278733d2919c0c16e3"
     },
     {
       "file": "smart.user.js",
