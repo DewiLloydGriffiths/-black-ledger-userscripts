@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.10
+// @version      1.9.11
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -107,6 +107,25 @@
     const record=privateKey?'workspace sync state':key==='black-ledger-oc-planner-options-v1'?'planner settings':key.startsWith('black-ledger-spawn-review-v1:')?'spawn review':key==='black-ledger-verified-roster-v1'?'membership verification':/^black-ledger-oc-pm-shared-v1:[1-9]\d*:[1-9]\d*$/.test(key)?'sent message history':key==='black-ledger-oc-newsletter-draft-v1'?'message draft':key==='black-ledger-oc-pm-queue-v1'?'message queue':'required local data';
     throw new Error('Device storage is full while saving '+record+'. OC data and message history have been preserved. This operation could not finish.');
   }
+
+  function blCleanupOldLocalData(now = Date.now()) {
+    const cutoff = now - 6 * 86400000;
+    const keys = [];
+    try {
+      for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i));
+      for (const key of keys) {
+        if (!(/^black-ledger-planner-snapshot-v1:[1-9]\d*$/.test(key) ||
+              /^black-ledger-spawn-review-v1:/.test(key) ||
+              key === 'black-ledger-oc-newsletter-draft-v1')) continue;
+        try {
+          const row = JSON.parse(localStorage.getItem(key));
+          const at = row?.scannedAt ?? row?.snapshot?.scannedAt ?? row?.createdAt ?? row?.expiresAt;
+          if (Number.isFinite(at) && at > 0 && at < cutoff) blStorageRemove(key);
+        } catch (_) {} // Unknown/corrupt records are not proof of age.
+      }
+    } catch (_) {} // Storage restrictions must not prevent the launcher loading.
+  }
+  blCleanupOldLocalData();
 
   function blViewer() {
     try { return String(JSON.parse(document.getElementById('torn-user')?.value || 'null')?.id || ''); }
@@ -331,6 +350,7 @@
       if(!row || !/^[1-9]\d{0,14}$/.test(String(row.recipient_id)) || !Number.isSafeInteger(row.sent_at) || row.sent_at<1 || row.sent_at>Date.now()+60000 || !/^[0-9a-f-]{36}$/.test(row.event_id) || typeof row.assignment_key!=='string')return false;
       try {
         const keys=JSON.parse(row.assignment_key);
+        if (row.retired === true) return Array.isArray(keys) && keys.length === 0;
         return Array.isArray(keys) && keys.length>0 && keys.length<=50 && JSON.stringify([...new Set(keys)].sort())===row.assignment_key && keys.every(k=>{const p=JSON.parse(k);return p.length===2 && /^[1-9]\d{0,14}$/.test(p[0]) && typeof p[1]==='string' && p[1].trim() && p[1].length<=80;});
       }catch(_){return false;}
     }
@@ -363,6 +383,16 @@
             for(const row of batch)if(latest.pending[row.recipient_id]?.event_id===row.event_id)delete latest.pending[row.recipient_id];
             blStorageSet(key(s),JSON.stringify(latest));
           }
+          if (typeof plannerMessageCleanupCandidates === 'function' && typeof plannerState !== 'undefined') {
+            const state = plannerState, current = load(s);
+            const queue = JSON.parse(blStorageGet('black-ledger-oc-pm-queue-v1') || 'null');
+            const candidates = queue?.sendAttempt ? [] : plannerMessageCleanupCandidates(state, current, s);
+            for (let start = 0; start < candidates.length; start += 100) {
+              const batch = candidates.slice(start, start + 100);
+              await messageHistoryRequest('PUT', {faction_id:50888, sender_id:s.viewerId, records:batch}, token, s.viewerId, '0', 'cleanup');
+              sameScope();
+            }
+          }
           const downloaded={};let after='0';
           do {
             const result=await messageHistoryRequest('GET',undefined,token,s.viewerId,after);sameScope();
@@ -376,6 +406,17 @@
           const latest=load(s);
           for(const [id,row]of Object.entries(downloaded)) {
             const old=latest.members[id];
+            if (row.retired === true) {
+              if (!latest.pending[id] && old && (row.sent_at > old.sentAt || (row.sent_at === old.sentAt && row.event_id >= String(old.eventId || '')))) {
+                const decisionKey = 'black-ledger-invitation-decisions-v1:'+s.viewerId+':'+s.factionId;
+                const decisions = JSON.parse(blStorageGet(decisionKey) || '{}');
+                if (decisions[id]?.fingerprint === JSON.stringify([old.key, old.sentAt])) {
+                  delete decisions[id]; blStorageSet(decisionKey, JSON.stringify(decisions));
+                }
+                delete latest.members[id];
+              }
+              continue;
+            }
             if(!old || row.sent_at>old.sentAt || (row.sent_at===old.sentAt && row.event_id>String(old.eventId || '')))
               latest.members[id]={key:row.assignment_key,sentAt:row.sent_at,eventId:row.event_id};
           }
@@ -406,8 +447,8 @@
     document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')poll(true);});
     setTimeout(()=>poll(true),2000);
   }
-  async function messageHistoryRequest(method = 'GET', body, token = '', sender = '', after = '0', area = 'history') {
-    const historyURL = 'https://shcecvzxdknpulytekcl.supabase.co/functions/v1/black-ledger-message-history?sender_id=' + encodeURIComponent(sender) + (method === 'GET' ? '&after=' + encodeURIComponent(after) : '') + (['workspace','claim'].includes(area)?'&area='+area:'');
+  async function messageHistoryRequest(method = 'GET', body, token = '', sender = '', after = '0', area = 'history-v2') {
+    const historyURL = 'https://shcecvzxdknpulytekcl.supabase.co/functions/v1/black-ledger-message-history?sender_id=' + encodeURIComponent(sender) + (method === 'GET' ? '&after=' + encodeURIComponent(after) : '') + (['workspace','claim','cleanup','history-v2'].includes(area)?'&area='+area:'');
     const headers = {Accept:'application/json'};
     if (token) headers['x-black-ledger-dashboard-token'] = token;
     if (body) headers['Content-Type'] = 'application/json';
@@ -2127,13 +2168,35 @@
   const COMPLETED_HISTORY_KEY = 'oc-manager-completed-history-v1';
   let completedHistoryMemory = null, completedHistoryTimer = null, completedHistoryUploadTimer = null, completedHistoryError = '';
   function completedHistoryStore() {
-    if (completedHistoryMemory) return completedHistoryMemory;
-    try {
-      const stored = typeof GM_getValue === 'function' ? GM_getValue(COMPLETED_HISTORY_KEY, null) : null;
-      completedHistoryMemory = stored || JSON.parse(blStorageGet(COMPLETED_HISTORY_KEY) || 'null');
-    } catch (_) {}
+    if (!completedHistoryMemory) {
+      try {
+        const stored = typeof GM_getValue === 'function' ? GM_getValue(COMPLETED_HISTORY_KEY, null) : null;
+        completedHistoryMemory = stored || JSON.parse(blStorageGet(COMPLETED_HISTORY_KEY) || 'null');
+      } catch (_) {}
+    }
     if (completedHistoryMemory?.version !== 1 || !completedHistoryMemory.records)
       completedHistoryMemory = {version:1, records:{}};
+    // Retain six days of completed evidence; never age out current OCs or CPR.
+    // Use completion time when known, otherwise the original capture time.
+    let removed = false;
+    for (const [id, record] of Object.entries(completedHistoryMemory.records)) {
+      const at = Date.parse(record.completed_at || record.captured_at);
+      if (Number.isFinite(at) && at > 0 && Date.now() - at > 6 * 86400000) {
+        delete completedHistoryMemory.records[id]; removed = true;
+      }
+    }
+    if (removed) {
+      try {
+        if (typeof GM_setValue === 'function') {
+          GM_setValue(COMPLETED_HISTORY_KEY, completedHistoryMemory);
+          // Remove a legacy local duplicate after the private write succeeds.
+          blStorageRemove(COMPLETED_HISTORY_KEY);
+          const checkpoint = COMPLETED_HISTORY_KEY + ':uploaded:50888';
+          const old = typeof GM_getValue === 'function' ? GM_getValue(checkpoint, {}) : {};
+          GM_setValue(checkpoint, Object.fromEntries(Object.entries(old || {}).filter(([id]) => completedHistoryMemory.records[id])));
+        } else blStorageSet(COMPLETED_HISTORY_KEY, JSON.stringify(completedHistoryMemory));
+      } catch (_) { completedHistoryError = 'Old history cleanup could not be saved; it will retry when history is opened.'; }
+    }
     return completedHistoryMemory;
   }
   async function completedHistoryRequest(method = 'GET', body, token = '', after = '0') {
@@ -2366,7 +2429,7 @@
     const card = document.createElement('div'); card.className = 'blom-card blom-completed-history';
     card.innerHTML = `<div class="blom-card-title">Completed OC history</div>
       <p data-history-count>${records.length} anonymous teams saved: ${successes} successes, ${records.length-successes} failures.</p>
-      <p>Open Completed and scroll through older results once. Newly loaded results are captured automatically, even with the manager panel closed. Player names and IDs are not saved. History syncs across authorised manager devices when shared CPR access is configured.</p>
+      <p>Open Completed and scroll through older results once. Newly loaded results are captured automatically, even with the manager panel closed. Player names and IDs are not saved. Local completed records are deleted after six days, using completion time when known or capture time otherwise. History syncs across authorised manager devices when shared CPR access is configured.</p>
       <p>Historical role-header CPR is saved separately from current CPR. Weights use the current role definitions; completion dates are left blank when unavailable.</p>
       <p>${escapeHtml(completedHistoryError)}</p><p data-history-sync-status role="status" aria-live="polite">${escapeHtml(completedHistorySyncStatus)}</p>
       <p data-history-last-sync class="blom-muted">${Number.isFinite(history.lastSyncedAt)?`Last synced: ${escapeHtml(new Date(history.lastSyncedAt).toLocaleString('en-GB', {timeZone:'Europe/London', hour12:false}))}`:'Last synced: not yet verified'}</p>
@@ -3717,6 +3780,28 @@
     renderPlannerIfOpen();
     document.dispatchEvent(new Event('black-ledger-workspace-dirty'));
     return true;
+  }
+
+  function plannerMessageCleanupCandidates(state, history, roster, now = Date.now()) {
+    if (!state?.shared || !state.complete || state.viewerId !== roster?.viewerId || state.factionId !== roster?.factionId ||
+        !Number.isFinite(state.scannedAt) || now < state.scannedAt || now - state.scannedAt >= 300000 ||
+        history?.viewerId !== roster.viewerId || history?.factionId !== roster.factionId) return [];
+    const candidates = [];
+    for (const [id, row] of Object.entries(history.members || {})) {
+      if (history.pending?.[id] || !Number.isFinite(row?.sentAt) || row.sentAt <= 0 || row.sentAt > (state.scanStartedAt ?? state.scannedAt) || !row.eventId) continue;
+      let pairs;
+      try { pairs = JSON.parse(row.key).map(k => JSON.parse(k)); } catch (_) { continue; }
+      if (!pairs.length || pairs.some(p => !Array.isArray(p) || p.length !== 2 || !/^[1-9]\d{0,14}$/.test(String(p[0])) || typeof p[1] !== 'string')) continue;
+      // All destinations must be resolved: bundled future invitations may span OCs.
+      const resolved = pairs.every(([crimeId, role]) => {
+        const crime = state.crimes.find(c => String(c.id) === String(crimeId));
+        if (!crime) return true; // Complete Recruiting + Planning scan proves absence.
+        const slots = crime.slots.filter(slot => normalize(prettyRole(slot.position_info?.label || slot.position)) === normalize(role));
+        return slots.length === 1 && String(slots[0].user?.id || '') === id;
+      });
+      if (resolved) candidates.push({recipient_id:id, assignment_key:row.key, sent_at:row.sentAt, event_id:row.eventId});
+    }
+    return candidates;
   }
 
   function plannerInvitationOccupancyRelease(state,previous,id,row) {
