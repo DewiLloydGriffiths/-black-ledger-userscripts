@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.11
+// @version      1.9.12
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -38,6 +38,8 @@
   const API_USAGE_KEY='black-ledger-manager-api-usage-v1';
   const API_COOLDOWN_KEY='black-ledger-manager-api-cooldown-v1';
   let apiNextAt=0;
+  // History sync also runs on compose pages, which return before planner setup.
+  let plannerState = null;
   // Shared, device-local membership contract. Never infer departures from OC slots.
   // Recover only replaceable caches; never delete Torn data, CPR observations,
   // message queues, sent receipts, membership verification or preferences.
@@ -1904,7 +1906,6 @@
   const PLANNER_MAX_AGE = 30 * 24 * 60 * 60 * 1000;
   const PLANNER_FORECAST_HOURS = 24;
   const PLANNER_FORECAST_MS = PLANNER_FORECAST_HOURS * 60 * 60 * 1000;
-  let plannerState = null;
   let plannerBusy = false;
   let plannerError = '';
 
@@ -4355,9 +4356,9 @@
     if(document.getElementById('blom-inline-button-styles'))return;
     const style=document.createElement('style');style.id='blom-inline-button-styles';
     style.textContent=`
-      #blom-inline-spawn {box-sizing:border-box!important;max-width:100%!important;margin:8px 0!important;padding:12px!important;background:#20333f!important;border:1px solid #638da7!important;border-radius:8px!important;overflow-wrap:anywhere!important;}
-      #blom-inline-spawn,#blom-inline-spawn p,#blom-inline-spawn strong {color:#eaf5fc!important;-webkit-text-fill-color:#eaf5fc!important;text-shadow:none!important;font:13px/1.5 sans-serif!important;}
-      #blom-inline-spawn strong {font-weight:700!important;}
+      #blom-inline-spawn {box-sizing:border-box!important;max-width:100%!important;margin:8px 0!important;padding:12px!important;background:#3a3020!important;border:1px solid #ac8550!important;border-radius:8px!important;overflow-wrap:anywhere!important;}
+      #blom-inline-spawn,#blom-inline-spawn p,#blom-inline-spawn strong {color:#ffdb9a!important;-webkit-text-fill-color:#ffdb9a!important;text-shadow:none!important;font:13px/1.5 sans-serif!important;}
+      #blom-inline-spawn strong {color:#ffcb70!important;-webkit-text-fill-color:#ffcb70!important;font-weight:700!important;}
       #blom-inline-spawn p {margin:6px 0!important;}
       #blom-inline-scan {display:grid !important;grid-template-columns:minmax(0,1fr) minmax(0,1fr) !important;gap:6px !important;align-items:stretch !important;padding:6px !important;}
       #blom-inline-scan > button {grid-row:1!important;grid-column:auto!important;margin:0 !important;padding:8px !important;min-height:44px !important;box-sizing:border-box !important;}
@@ -5319,7 +5320,7 @@
         const outcomeDetails=outcomes=>outcomes.map(o=>`<div style="padding:8px 0;border-top:1px solid #344650"><strong>${escapeHtml(o.crime)}</strong> · ${o.filled}/${o.total} roles now · ${o.daily.complete?'Crew of '+o.daily.required+' stage'+(o.daily.required===1?'':'s')+' supported':`Next unfilled deadline: +${o.daily.nextDeadline}h`} · ${o.daily.remainingRoles} later roles unresolved${o.missing.length?` · gaps now: ${o.missing.map(prettyRole).map(escapeHtml).join(', ')}`:''}${[...o.plannedCrew].map(([id,fit])=>{const member=[...unusedNow,...unusedSoon].find(m=>String(m.id)===id),soon=plan.active.soon.get(id);return `<div class="blom-placement-meta">${escapeHtml(prettyRole(fit.role))} · ${escapeHtml(member?.name || id)} · ${unusedNow.some(m=>String(m.id)===id)?'Available now':soon?'Expected free in '+escapeHtml(plannerTime(soon.readyAt)):'Future availability unknown'} · join by +${o.daily.schedule.find(row=>row.id===String(id))?.joinByHours ?? '?'}h · ${formatCpr(fit.cpr)} CPR / target ${fit.target}%</div>`;}).join('')}${l.level>=7?`<div class="blom-placement-note">${o.plannedRobust?'Backup crew available':'No confirmed backup crew'}</div>`:''}${o.plannedUncertain?'<div class="blom-spawn-warning">Verify CPR: estimated, stale or undated readings.</div>':''}</div>`).join('');
         return `<tr><td><strong>${plannerSpawnLabel(l)}</strong></td><td><strong>${quantity?'× '+quantity.count:'—'}</strong>${quantity?.partial?`<div class="blom-placement-note">${quantity.partial} conditional</div>`:''}${plans.length?`<details data-bl-disclosure-key="spawn-${l.level}-starters"><summary>Planned starters</summary>${plans.map(c=>{const m=unusedNow.find(m=>String(m.id)===c.starter.id);return `<div>${escapeHtml(m?.name || c.starter.id)} · ${escapeHtml(c.starter.crime)} · ${escapeHtml(prettyRole(c.starter.role))} · ${formatCpr(c.starter.cpr)} CPR</div>`;}).join('')}</details>`:''}</td><td>${plannerScopeCost(l)}</td><td>${l.seeded}/${l.outcomes.length}</td><td>${l.dailyCovered}/${l.outcomes.length}</td><td>${assessment}<details data-bl-disclosure-key="spawn-${l.level}-arrivals"><summary>Starter crews and expected arrivals</summary>${outcomeDetails(l.outcomes)}</details>${plans.length>1?`<details data-bl-disclosure-key="spawn-${l.level}-additional"><summary>Additional planned OCs (${plans.length-1})</summary>${plans.slice(1).map((c,i)=>`<strong>OC ${i+2}${c.partial?' · conditional':''}</strong>${outcomeDetails(c.outcomes)}`).join('')}</details>`:''}</td></tr>`;
       }).join('');
-      return `<section class="blom-section blom-spawn-section"><div class="blom-section-body">${plannerSpawnSummaryCard(needed,plannerState,plan,prefs)}</div><details class="blom-inline-details"><summary>Staffing details</summary><details class="blom-section" open><summary><span>Prepare new OCs</span><span class="blom-mini-badge ${needed.crews.some(c=>c.partial)?'blom-warn':''}">${needed.crews.length?needed.crews.length+' estimated · '+(needed.crews.some(c=>c.partial)?'review gaps':'review Scope'):spawnOpportunity?'Best-fit option · review risk':'No supported start'}</span></summary><div class="blom-section-body">
+      return `<section class="blom-section blom-spawn-section"><div class="blom-section-body blom-spawn-summary">${plannerSpawnSummaryCard(needed,plannerState,plan,prefs)}</div><details class="blom-inline-details"><summary>Staffing details</summary><details class="blom-section" open><summary><span>Prepare new OCs</span><span class="blom-mini-badge ${needed.crews.some(c=>c.partial)?'blom-warn':''}">${needed.crews.length?needed.crews.length+' estimated · '+(needed.crews.some(c=>c.partial)?'review gaps':'review Scope'):spawnOpportunity?'Best-fit option · review risk':'No supported start'}</span></summary><div class="blom-section-body">
         ${needed.highEndHold?'<p class="blom-placement-note">L7–8 spawning held: an L8 already exists. Support that OC first; one L8 at a time.</p>':''}
         <details class="blom-inline-details" data-bl-disclosure-key="spawn-reservations"><summary>Existing reservations</summary><div class="blom-placement-note">${plan.available.filter(m=>plan.coverageReservations?.has(String(m.id))).length} free members and ${[...(plan.coverageReservations?.keys() || [])].filter(id=>!plan.available.some(m=>String(m.id)===id)).length} future arrivals reserved for later stages in existing OCs. These reservations are excluded from new crews.</div>${[...(plan.coverageReservations || new Map())].map(([id,fit])=>`<div class="blom-placement-note">${escapeHtml(plan.upcoming.find(m=>String(m.id)===id)?.name || id)} · L${fit.level} ${escapeHtml(fit.crime)} #${escapeHtml(fit.crimeId)} · ${escapeHtml(prettyRole(fit.role))} · conditional join by ${escapeHtml(plannerTime(fit.joinByAt))}</div>`).join('')}</details>
         ${plan.spawningBlocked?'<div class="blom-alert blom-alert-bad"><strong>Hold new spawns — unresolved checks.</strong> '+(plan.unassessedExisting.length?plan.unassessedExisting.length+' OCs need their levels or definitions checked. ':'')+'Resolve checks that cannot be isolated to held members, then rescan.</div>':plan.assignmentConflicts?.length?'<p class="blom-placement-note">'+plan.assignmentConflicts.length+' invitation issues need review. Affected members remain held out; these new-start plans use only independent spare candidates.</p>':''}
@@ -10401,6 +10402,9 @@
       #${PANEL_ID} .blom-forecast-chips span { padding:5px 8px !important; background:#25323a !important; border-radius:7px !important; color:#b9c7ce !important; font-size:10px !important; }
       #${PANEL_ID} .blom-forecast-chips b { color:#eef8fc !important; }
       #${PANEL_ID} .blom-muted { color:#90a0aa !important; font-size:9px !important; line-height:1.35 !important; }
+      #${PANEL_ID} .blom-spawn-summary { background:#3a3020 !important; border:1px solid #ac8550 !important; border-radius:8px !important; color:#ffdb9a !important; -webkit-text-fill-color:#ffdb9a !important; overflow-wrap:anywhere !important; }
+      #${PANEL_ID} .blom-spawn-summary > strong { color:#ffcb70 !important; -webkit-text-fill-color:#ffcb70 !important; }
+      #${PANEL_ID} .blom-spawn-summary > p { color:#ffdb9a !important; -webkit-text-fill-color:#ffdb9a !important; }
       #${PANEL_ID} .blom-spawn-stack { margin-top:9px !important; }
       #${PANEL_ID} .blom-spawn-hero { display:flex !important; align-items:center !important; justify-content:space-between !important; gap:10px !important; padding:9px !important; background:#202c33 !important; border-radius:8px !important; }
       #${PANEL_ID} .blom-spawn-hero strong { display:block !important; color:#f2f8fb !important; font-size:14px !important; }
