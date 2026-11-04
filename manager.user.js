@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.12
+// @version      1.9.13
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -5085,7 +5085,9 @@
     if(itemScope!==planningItemsScope){planningItemsScope=itemScope;planningItemsReport=null;planningItemsAttemptAt=0;planningItemsCards='';document.getElementById('blom-planning-items-report')?.remove();}
     if(!planningItemsReport)restorePlanningItemsCache();
     if(!document.getElementById('blom-planning-items-report'))showPlanningItemsReport(false);
-    if(toolbar.dataset.signature!==signature){const previousDetails=toolbar.querySelector('.blom-scan-details');if(previousDetails)toolbar.dataset.detailsOpen=String(previousDetails.open);toolbar.dataset.signature=signature;toolbar.replaceChildren();const button=document.createElement('button');button.type='button';button.textContent='Scan OCs';button.title='Scan Recruiting + Planning';button.disabled=plannerBusy;button.style.cssText='padding:10px;margin-right:10px;min-height:44px;cursor:pointer';button.onclick=async()=>{const work=refreshPlanner();renderInlineRecruiting();await work;renderInlineRecruiting();autoPlanningItems(true);};const card=document.createElement('div');card.className='blom-shared-scan-card';card.setAttribute('role','status');card.setAttribute('aria-live','polite');
+    // Torn/PDA can retain title popups after these controls are replaced.
+    // Keep descriptions accessible without registering host-page hover tooltips.
+    if(toolbar.dataset.signature!==signature){const previousDetails=toolbar.querySelector('.blom-scan-details');if(previousDetails)toolbar.dataset.detailsOpen=String(previousDetails.open);toolbar.dataset.signature=signature;toolbar.replaceChildren();const button=document.createElement('button');button.type='button';button.textContent='Scan OCs';button.setAttribute('aria-description','Scan Recruiting + Planning');button.disabled=plannerBusy;button.style.cssText='padding:10px;margin-right:10px;min-height:44px;cursor:pointer';button.onclick=async()=>{const work=refreshPlanner();renderInlineRecruiting();await work;renderInlineRecruiting();autoPlanningItems(true);};const card=document.createElement('div');card.className='blom-shared-scan-card';card.setAttribute('role','status');card.setAttribute('aria-live','polite');
       const label=document.createElement('strong');label.textContent='Shared Scan';card.appendChild(label);
       if(!plannerBusy && !plannerError && !unscanned && scanModel){
         const date=new Date(plannerState.scannedAt),time=document.createElement('time');time.dateTime=date.toISOString();
@@ -5099,7 +5101,7 @@
       info.open=toolbar.dataset.detailsOpen==='true';
       info.addEventListener('toggle',()=>{if(info.isConnected)toolbar.dataset.detailsOpen=String(info.open);});
       info.append(summary,card);toolbar.append(button,info);mountInlineDetailBody(info,'blom-scan-details-body');
-      const items=document.createElement('button');items.type='button';items.textContent=planningItemsBusy?'Checking items…':'Refresh items';items.title='Refresh Planning items';items.disabled=planningItemsBusy;items.style.cssText='grid-column:1 / -1;min-height:44px;padding:8px';items.onclick=()=>scanPlanningItems({silent:true});toolbar.appendChild(items);}
+      const items=document.createElement('button');items.type='button';items.textContent=planningItemsBusy?'Checking items…':'Refresh items';items.setAttribute('aria-description','Refresh Planning items');items.disabled=planningItemsBusy;items.style.cssText='grid-column:1 / -1;min-height:44px;padding:8px';items.onclick=()=>scanPlanningItems({silent:true});toolbar.appendChild(items);}
     const model=scanModel,visited=new Set(),sentBatch={};
     if(typeof renderUnassignedMailBadges==='function')renderUnassignedMailBadges(model);
     const previous=plannerInputContext;plannerInputContext=model?.state || null;
