@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.17
+// @version      1.9.18
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -8155,6 +8155,9 @@
           Export merged CPR JSON
         </button>
 
+        <button id="blom-export-planner" class="blom-primary" type="button">Export planner diagnostic JSON</button>
+        <p class="blom-muted">Includes the fresh scan, dated scores, vacancies, recommendations and invitation holds for troubleshooting.</p>
+
         <button
           id="blom-import"
           type="button"
@@ -8242,6 +8245,8 @@
         "click",
         exportMergedData
       );
+
+    body.querySelector('#blom-export-planner').addEventListener('click',exportPlannerDiagnostic);
 
     const input =
       body.querySelector(
@@ -9222,6 +9227,45 @@
    * IMPORT / EXPORT
    * ============================================================
    */
+
+  function plannerDiagnosticExport(state,plan,prefs,assessment,now=Date.now()) {
+    if(!state?.shared || !state.complete || !Number.isFinite(state.scannedAt) || now<state.scannedAt || now-state.scannedAt>=300000)throw new Error('Run Fresh shared scan on the OC page, then export the planner diagnostic within five minutes.');
+    // Explicit field selection: never serialize browser storage, access codes,
+    // API keys, session data, message bodies or arbitrary snapshot properties.
+    const pick=(value,keys)=>Object.fromEntries(keys.filter(key=>value?.[key]===null || ['string','number','boolean'].includes(typeof value?.[key])).map(key=>[key,typeof value[key]==='number' && !Number.isFinite(value[key])?String(value[key]):value[key]]));
+    const slotKeys=['key','crimeId','crime','role','level','weight','roleCount','opening','startable','openingUnsupported','openingHoldReason','expiresAt','expiresKnown','stallAt','coverageSource','emptySlots','filledSlots','itemId'];
+    const fit=value=>({...pick(value,[...slotKeys,'cpr','target','kind','source','seen','stale','confidence','margin','joinByAt','planningStartAt','queueWaitHours','conditionalPlanning','capabilityLevel','assignmentPriority','trialPlacement','idleExistingFallback','idleL8Fallback','rebalancedExisting','l8Shortfall']),...(value?.estimatedFrom?{estimatedFrom:pick(value.estimatedFrom,['crime','role','level','cpr','method','peerCount','adjustment','allowance'])}:{})});
+    const assignments=map=>[...(map || new Map())].map(([id,value])=>({member_id:String(id),fit:fit(value)}));
+    const owners=new Map([...plan.now,...plan.next].map(([id,value])=>[value.key,{member_id:String(id),future:plan.next.has(id),sent:plan.mailedHeld.has(String(id))}]));
+    const eligibility=plan.available.flatMap(member=>(plan.active.open || []).map(slot=>{
+      const id=String(member.id),observed=plannerObservation(id,slot.crime,slot.role,true),estimated=observed?null:plannerEstimatedRole(id,slot),match=plannerFit(id,slot,prefs);
+      return {member_id:id,slot_key:slot.key,target:mainScriptTarget(slot.crime,slot.level,slot.weight,slot.roleCount,slot.role),level_floor:plannerLevelFloor(id,prefs),observed:observed?fit(observed):null,estimated:estimated?fit(estimated):null,eligible:!!match,owner:owners.get(slot.key) || null};
+    }));
+    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || 'unknown'):'1.9.18',exported_at:new Date(now).toISOString(),
+      snapshot:{...pick(state,['version','complete','shared','revision','scannedAt','scanStartedAt','factionId','viewerId']),
+        members:(state.members || []).map(m=>({...pick(m,['id','name','is_in_oc','ocEligible']),status:pick(m.status,['state'])})),
+        crimes:(state.crimes || []).map(crime=>({...pick(crime,['id','name','difficulty','status','isExpiring','ready_at','expired_at','pageScan','planningPhase','planningSecondsPerSlot','planningObservedAt']),slots:(crime.slots || []).map(slot=>({...pick(slot,['position','planningPercent','planningState']),position_info:pick(slot.position_info,['label']),user:slot.user===null?null:slot.user?pick(slot.user,['id','name']):undefined,item_requirement:pick(slot.item_requirement,['id'])}))})),
+        profiles:(state.profiles || []).map(profile=>pick(profile,['user_id','crime','role','latest_cpr','last_observed_at'])),
+        weights:Object.fromEntries(Object.entries(state.weights || {}).map(([crime,def])=>[crime,{level:Number(def.level),roles:Object.fromEntries(Object.entries(def.roles || {}).filter(([,weight])=>typeof weight==='number' && Number.isFinite(weight)))}])),
+        targetPolicy:pick(state.targetPolicy,['schema_version','offset','min','max']),learning:(state.learning || []).map(row=>pick(row,['crime','successes','failures']))},
+      preferences:{levels:plannerSelectedLevels(prefs),includeStale:prefs.includeStale===true,asOf:prefs.asOf,spawnBrackets:true,spawnBudget:{...pick(prefs.spawnBudget,['balance','reserve','updatedAt']),knownCrimeIds:(prefs.spawnBudget?.knownCrimeIds || []).map(String).filter(id=>/^\d+$/.test(id))}},
+      plan:{available:plan.available.map(member=>String(member.id)),now:assignments(plan.now),next:assignments(plan.next),coverageReservations:assignments(plan.coverageReservations),mailedHeld:[...plan.mailedHeld].map(String),open:(plan.active.open || []).map(fit),deferred:(plan.deferred || []).map(fit),spawningBlocked:!!plan.spawningBlocked,assignmentConflicts:(plan.assignmentConflicts || []).map(issue=>({...pick(issue,['id','reason','action','canKeep','target','cpr']),destinations:(issue.destinations || []).map(destination=>pick(destination,['crimeId','crime','role']))})),
+        workOrders:plannerMemberWorkOrders(plan,assessment,prefs).map(row=>({member_id:String(row.member.id),kind:row.kind,priority:row.priority,text:row.text})),eligibility},
+      spawn:{crews:(assessment.needed.crews || []).map(crew=>({...pick(crew,['label','level','partial','readyHours']),ids:(crew.ids || []).map(String)})),brackets:(assessment.preparation?.levels || []).map(level=>({...pick(level,['level','dailyCovered','seeded']),outcomes:(level.outcomes || []).map(outcome=>({crime:outcome.crime,complete:outcome.daily?.complete===true,uncertain:outcome.plannedUncertain,schedule:(outcome.daily?.schedule || []).map(row=>({member_id:String(row.id),availableHours:row.availableHours,joinByHours:row.joinByHours,fit:fit(row.fit)}))}))}))}};
+  }
+
+  function exportPlannerDiagnostic() {
+    const model=inlinePlannerModel();
+    if(!model){alert('Run Fresh shared scan on the OC page, then export the planner diagnostic within five minutes.');return;}
+    const previous=plannerInputContext;plannerInputContext=model.state;
+    try{
+      const prefs={...model.state.prefs,asOf:model.state.scannedAt,spawnBrackets:true,spawnBudget:applyLiveScopeBudget(model.state.prefs),learning:model.state.learning || []};
+      const assessment=plannerSpareSpawnAssessment(model.plan,model.state,prefs);
+      const diagnostic=plannerDiagnosticExport(model.state,model.plan,prefs,assessment);
+      downloadJSON(diagnostic,'black_ledger_planner_diagnostic_'+new Date().toISOString().slice(0,10)+'.json');
+    }catch(error){alert('Could not export planner diagnostic: '+String(error.message || error));}
+    finally{plannerInputContext=previous;}
+  }
 
   function exportMergedData() {
 
@@ -10472,6 +10516,10 @@
       #${PANEL_ID} .blom-stat strong { display:block !important; color:#f6fbfd !important; font-size:20px !important; line-height:1.05 !important; }
       #${PANEL_ID} .blom-stat span { display:block !important; margin-top:4px !important; color:#aebbc3 !important; font-size:9px !important; line-height:1.15 !important; }
       #${PANEL_ID} .blom-stat-accent { border-color:#4caee2 !important; background:#20303a !important; }
+      #${PANEL_ID} #blom-export-planner{color:#eef7ff!important;-webkit-text-fill-color:#eef7ff!important;background:#245b7c!important;border:1px solid #67b7e4!important;min-height:44px!important;white-space:normal!important;overflow-wrap:anywhere!important}
+      #${PANEL_ID} #blom-export-planner:hover{background:#307395!important}
+      #${PANEL_ID} #blom-export-planner:focus-visible{outline:2px solid #ffe39c!important;outline-offset:2px!important}
+      #${PANEL_ID} #blom-export-planner:disabled{color:#d3dde5!important;-webkit-text-fill-color:#d3dde5!important;background:#374b59!important;border-color:#708694!important;opacity:1!important}
       #${PANEL_ID} .blom-section {
         margin:9px 0 !important; border:1px solid #344955 !important; border-radius:9px !important;
         background:#182025 !important; overflow:hidden !important;
