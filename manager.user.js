@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.15
+// @version      1.9.16
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -2744,11 +2744,11 @@
   }
 
   function plannerSimilarRoleNote(memberId,plan,prefs) {
-    // Cross-crime CPR is evidence for a manual check, never destination CPR.
+    // Show manual leads only where no provisional destination estimate exists.
     const rows=[],base=role=>normalize(String(role).replace(/[\s#\d]+$/,''));
     const minimum=plannerLevelFloor(String(memberId),prefs).minimum;
     for(const slot of plan.active.open || []){
-      if(slot.level<minimum || plannerObservation(String(memberId),slot.crime,slot.role,true))continue;
+      if(slot.level<minimum || plannerObservation(String(memberId),slot.crime,slot.role,true) || typeof plannerEstimatedRole==='function' && plannerEstimatedRole(String(memberId),slot))continue;
       let best=null;
       for(const [crime,def] of Object.entries(plan.defs)){
         if(crime===slot.crime || Number(def.level)!==Number(slot.level))continue;
@@ -2894,7 +2894,15 @@
     const fits=(plan.active.open || []).filter(slot=>plannerFit(id,slot,prefs));
     const used=new Set([...plan.now.values(),...plan.next.values()].map(fit=>fit.key));
     if(fits.some(slot=>!slot.openingUnsupported && !used.has(slot.key)))return {kind:'next-review',text:'Qualifying role evidence exists, but this role is held by opening support or unresolved timing checks. Review the OC timer and starter/follower support, then rescan.'};
-    if(fits.some(slot=>!slot.openingUnsupported))return {kind:'next-review',text:'The qualifying existing roles are already allocated to other current or forecast members. Preserve those commitments; assess another suitable existing vacancy or supported start.'};
+    if(fits.some(slot=>!slot.openingUnsupported)){
+      const names=new Map([...(plan.available || []),...(plan.upcoming || [])].map(member=>[String(member.id),member.name || String(member.id)]));
+      const owners=fits.filter(slot=>!slot.openingUnsupported).map(slot=>{
+        const entry=[...plan.now,...plan.next].find(([,fit])=>fit.key===slot.key);
+        if(!entry)return null;const [owner]=entry;
+        return prettyRole(slot.role)+' → '+(names.get(String(owner)) || String(owner))+' ('+(plan.mailedHeld?.has(String(owner))?'sent invitation':plan.next.has(String(owner))?'unsent forecast':'current recommendation')+')';
+      }).filter(Boolean);
+      return {kind:'next-review',text:'Qualifying roles are allocated: '+owners.join('; ')+'. No qualifying rearrangement was found without displacing a sent invitation, breaking staffing support or leaving another free member idle. Review another suitable vacancy or supported start.'};
+    }
     if(plannerLevelFloor(id,prefs).highest>=7 && plan.idleL8Fallback?.issues.has(id))return {kind:'needs-fit',text:plan.idleL8Fallback.issues.get(id)};
     const held=fits.find(slot=>!used.has(slot.key) && slot.openingUnsupported);
     if(held)return {kind:'held',text:held.openingHoldReason || 'A suitable role exists, but this empty OC lacks a distinct timely follower. Review the starter/follower pair.'};
@@ -3702,7 +3710,7 @@
     }
     const roster=blRoster();
     const sortRows=rows=>[...(rows || [])].sort((a,b)=>JSON.stringify(canonical(a)).localeCompare(JSON.stringify(canonical(b))));
-    return plannerReviewDigest(JSON.stringify(canonical({planningStrategy:'idle-existing-role-fallback-v26',
+    return plannerReviewDigest(JSON.stringify(canonical({planningStrategy:'idle-member-augmenting-matches-v27',
       crimes:sortRows((state.crimes || []).map(c=>({id:c.id,name:c.name,difficulty:c.difficulty,status:c.status,isExpiring:c.isExpiring,ready_at:c.ready_at,expired_at:c.expired_at,slots:c.slots}))),
       members:sortRows(state.members),profiles:sortRows(state.profiles),weights:state.weights,targetPolicy:state.targetPolicy,learning:state.learning,
       levels:plannerSelectedLevels(prefs).sort((a,b)=>a-b),includeStale:prefs.includeStale===true,
@@ -3964,6 +3972,54 @@
     return {held,level,count:supported.length,starterOnly:true};
   }
 
+  function plannerRebalanceIdleMembers(state,plan,prefs) {
+    const result={placements:new Map(),removedForecast:new Set()};
+    if(!state.shared || !Number.isFinite(state.scannedAt) || Date.now()-state.scannedAt<0 || Date.now()-state.scannedAt>300000)return result;
+    const current=new Map(plan.now),future=new Map(plan.next),held=plan.mailedHeld;
+    const available=plan.available.filter(m=>m.ocEligible!==false && (!m.status?.state || m.status.state==='Okay') && !held.has(String(m.id)));
+    const idle=available.filter(m=>!current.has(String(m.id)) && !future.has(String(m.id)));
+    if(!idle.length)return result;
+    const upcoming=plan.upcoming.filter(m=>!current.has(String(m.id)) && !future.has(String(m.id)) && !held.has(String(m.id)));
+    const memberReadyHours=Object.fromEntries(upcoming.map(m=>[String(m.id),Math.max(0,(plan.active.soon.get(String(m.id)).readyAt-prefs.asOf)/3600000)]));
+    const highEndSpawnBlocked=state.crimes.some(crime=>(Number(crime.difficulty) || plan.defs[crime.name]?.level)===8 && ['recruiting','planning'].includes(crime.status));
+    let needed=plannerSpawnNeeded(idle,plan.defs,{...prefs,spawningBlocked:plan.spawningBlocked,highEndSpawnBlocked,memberReadyHours},plan.protectedHigh,[{hours:24,members:upcoming}]);
+    needed=plannerTrackSpawnDemand(needed,state,plan,prefs);
+    const protectedStarts=new Set();
+    for(const crew of needed.crews)if(plannerSpawnQuantityDecision({...needed,crews:[crew]},state,plan,prefs).allowed)
+      for(const id of crew.ids)protectedStarts.add(String(id));
+    const slots=plan.active.open.filter(slot=>slot.level<8 && !slot.opening && !slot.openingUnsupported && Number.isFinite(slot.stallAt) && slot.expiresAt>prefs.asOf);
+    const byKey=new Map(slots.map(slot=>[slot.key,slot]));
+    for(const member of idle){
+      const root=String(member.id);if(protectedStarts.has(root) || current.has(root))continue;
+      const owners=new Map([...current,...future].map(([id,fit])=>[fit.key,{id,fit,future:future.has(id)}]));
+      const fixed=new Set([...plan.coverageReservations.values()].map(fit=>fit.key));
+      for(const [id,fit] of [...current,...future])if(held.has(id) || !byKey.has(fit.key))fixed.add(fit.key);
+      const counts=new Map();for(const fit of [...current.values(),...future.values(),...plan.coverageReservations.values()])counts.set(String(fit.crimeId),(counts.get(String(fit.crimeId))||0)+1);
+      const seenMembers=new Set(),seenSlots=new Set();
+      function find(id){
+        if(seenMembers.has(id))return null;seenMembers.add(id);
+        const options=slots.filter(slot=>!fixed.has(slot.key) && !seenSlots.has(slot.key)).map(slot=>{
+          const owner=owners.get(slot.key),fit=plannerFit(id,slot,prefs);if(!fit)return null;
+          const stageAt=owner?.fit.joinByAt ?? plannerStagedDeadline(slot,counts.get(String(slot.crimeId))||0,prefs.asOf);
+          if(!Number.isFinite(stageAt))return null;
+          return {owner,fit:{...fit,joinByAt:stageAt,conditionalPlanning:true,queueWaitHours:Math.max(0,(stageAt-prefs.asOf)/3600000),assignmentPriority:owner?.fit.assignmentPriority || 4,idleExistingFallback:stageAt>prefs.asOf+48*3600000,rebalancedExisting:true}};
+        }).filter(Boolean).sort((a,b)=>Number(!!a.owner)-Number(!!b.owner) || b.fit.level-a.fit.level || a.fit.joinByAt-b.fit.joinByAt || plannerOrder(a.fit,b.fit));
+        for(const option of options){
+          const {owner,fit}=option;seenSlots.add(fit.key);
+          if(!owner)return {moves:new Map([[id,fit]]),removed:null};
+          if(owner.future)return {moves:new Map([[id,fit]]),removed:owner.id};
+          const chain=find(owner.id);
+          if(chain){chain.moves.set(id,fit);return chain;}
+        }
+        return null;
+      }
+      const chain=find(root);if(!chain)continue;
+      if(chain.removed){future.delete(chain.removed);result.removedForecast.add(chain.removed);}
+      for(const [id,fit] of chain.moves){current.set(id,fit);result.placements.set(id,fit);}
+    }
+    return result;
+  }
+
   function plannerIdleExistingFallback(state,plan,prefs) {
     const result={placements:new Map(),spawnProtected:new Set()};
     if(!state.shared || !Number.isFinite(state.scannedAt) || Date.now()-state.scannedAt<0 || Date.now()-state.scannedAt>300000)return result;
@@ -4165,7 +4221,12 @@
       }
       plan.idleL8Fallback=plannerIdleL8Fallback(state,plan,prefs);
       for(const [id,fit] of plan.idleL8Fallback.placements)now.set(id,fit);
-      if(plan.idleL8Fallback.placements.size || plan.idleExistingFallback?.placements.size){
+      if(typeof plannerRebalanceIdleMembers==='function'){
+        plan.rebalanced=plannerRebalanceIdleMembers(state,plan,prefs);
+        for(const id of plan.rebalanced.removedForecast)next.delete(id);
+        for(const [id,fit] of plan.rebalanced.placements)now.set(id,fit);
+      }
+      if(plan.idleL8Fallback.placements.size || plan.idleExistingFallback?.placements.size || plan.rebalanced?.placements.size){
         const filled=new Set([...now.values(),...next.values()].map(fit=>fit.key));
         plan.deferred=deferred.filter(slot=>!filled.has(slot.key));
         plan.staffingRisks=staffingRisks.filter(slot=>!filled.has(slot.key));
@@ -5271,7 +5332,7 @@
         const deferredKeys=new Set((plan.deferred || []).map(s=>s.key));
         const matching=(plan.active.open || []).filter(s=>plannerFit(String(member.id),s,prefs));
         const deferredFits=matching.filter(s=>deferredKeys.has(s.key));
-        const allocationNote=plan.mailedHeld?.has(String(member.id))?'An existing sent invitation reserves this member. Review that invitation before assigning elsewhere.':deferredFits.length && deferredFits.length===matching.length?'Qualifying existing roles are deferred: '+[...new Set(deferredFits.map(s=>s.crime+' — '+prettyRole(s.role)))].join('; ')+'. Keep these later conveyor slots open for future finishers; next joins are covered conditionally or are not due yet.':matching.length?'A qualifying vacancy exists but has no allocation for this member. Review reservations and planned stage coverage.':'No recorded exact-role CPR qualifies for a currently needed, assessed vacancy. The highest known level shown above refers to other recorded roles.';
+        const allocationNote=plan.mailedHeld?.has(String(member.id))?'An existing sent invitation reserves this member. Review that invitation before assigning elsewhere.':deferredFits.length && deferredFits.length===matching.length?'Qualifying existing roles are deferred: '+[...new Set(deferredFits.map(s=>s.crime+' — '+prettyRole(s.role)))].join('; ')+'. Keep these later conveyor slots open for future finishers; next joins are covered conditionally or are not due yet.':matching.length?'Qualifying role evidence exists; check the work order and role owners below for remaining allocation blockers.':'No recorded exact-role CPR qualifies for a currently needed, assessed vacancy. The highest known level shown above refers to other recorded roles.';
         return `<div class="blom-placement-title">Highest known qualifying level: L${best.level}</div>
           <div class="blom-placement-meta">${escapeHtml(best.crime)} · ${escapeHtml(prettyRole(best.role))}</div>
           <div class="blom-placement-meta"><strong>${formatCpr(best.cpr)} CPR</strong> · target ${best.target}% · ${best.kind} · confidence ${best.confidence}</div>
@@ -5288,6 +5349,7 @@
         ${!fit.startable && fit.conditionalPlanning && Number.isFinite(fit.joinByAt)?`<div class="blom-placement-note">Next conveyor join; future-assignment members must finish their current OC first. Latest planned join: ${escapeHtml(new Date(fit.joinByAt).toLocaleString('en-GB',{timeZone:'Europe/London',hour12:false}))}. Depends on earlier planned joins happening; rescan after each join.</div>`:''}
         ${Number.isFinite(fit.queueWaitHours)?`<div class="blom-placement-note">Expected queue wait after becoming available: ${fit.queueWaitHours.toFixed(1)} hours. Stage timing is conditional on earlier joins.</div>`:''}
         ${fit.l8Shortfall?`<div class="blom-placement-note">L8 near-target allowance: ${formatCpr(fit.cpr)}% CPR / ${fit.target}% target · ${fit.l8Shortfall} point(s) below, within the 3-point allowance.</div>`:''}
+        ${fit.rebalancedExisting?`<div class="blom-placement-note">Unsent recommendations rebalanced to give a qualifying free member work. Sent invitations and actual occupants are preserved.</div>`:''}
         ${fit.idleExistingFallback?`<div class="blom-placement-note">Last-resort existing OC placement: no supported spendable new start is reserved for this member. Join this qualifying role now; the queue may exceed 48 hours. Estimated stage wait: ${Number.isFinite(fit.queueWaitHours)?fit.queueWaitHours.toFixed(1)+' hours':'unknown'}. Timing depends on earlier joins; rescan after joining.</div>`:''}
         ${fit.idleL8Fallback?`<div class="blom-placement-note">Last-resort L8 placement: no supported spendable new start was reserved for this member. Estimated planning queue wait: ${Number.isFinite(fit.queueWaitHours)?fit.queueWaitHours.toFixed(1)+' hours':'unknown; check the OC timer'}. This intentionally uses a later L8 role instead of leaving the member idle.</div>`:''}
         ${fit.itemId?`<div class="blom-placement-note blom-item-warning">Check required item #${escapeHtml(fit.itemId)}</div>`:''}`;
