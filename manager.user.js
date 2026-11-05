@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.19
+// @version      1.9.20
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -2891,6 +2891,10 @@
     if(assessment.needed.trackingError)return {kind:'needs-review',text:assessment.needed.trackingError};
     const id=String(member.id),crews=assessment.needed.crews.filter(crew=>crew.ids.includes(id));
     if(crews.length)return {kind:'new-start',text:'Proposed new-OC candidate: '+[...new Set(crews.map(crew=>crew.label))].join(', ')+'. Review Scope and spawn one, then scan its actual roles; this is conditional until the OC exists.'};
+    if(assessment.releaseStart?.currentIds.includes(id)){
+      const forecast=assessment.releaseStart,when=new Date(forecast.startAt).toLocaleString('en-GB',{timeZone:'Europe/London',hour12:false});
+      return {kind:forecast.scopeReady?'new-start':'needs-review',text:'Conditional new-start candidate after crew release at '+when+': reassess one '+forecast.label+' OC using the free members and qualifying finishers. Confirm completion, run Fresh shared scan and recheck Scope first. Exact roles depend on the actual random outcome; this is not an existing-role assignment.'+(!forecast.scopeReady?' Scope/policy review: '+forecast.scopeReason:'')};
+    }
     const fits=(plan.active.open || []).filter(slot=>plannerFit(id,slot,prefs));
     const used=new Set([...plan.now.values(),...plan.next.values()].map(fit=>fit.key));
     if(fits.some(slot=>!slot.openingUnsupported && !used.has(slot.key)))return {kind:'next-review',text:'Qualifying role evidence exists, but this role is held by opening support or unresolved timing checks. Review the OC timer and starter/follower support, then rescan.'};
@@ -3316,7 +3320,7 @@
     const preferFuture=prefs.preferFutureFollower===true || def.level===8;
     function compareCrew(a,b){
       const uncertain=crew=>crew.filter(r=>r.fit.kind==='Estimated' || r.fit.kind==='Recorded high' || !r.fit.seen || r.fit.stale).length;
-      return (def.level===8?b.reduce((sum,row)=>sum+row.fit.cpr,0)-a.reduce((sum,row)=>sum+row.fit.cpr,0):0) || uncertain(a)-uncertain(b) || a.filter(r=>r.availableHours===0).length-b.filter(r=>r.availableHours===0).length || (a.at(-1)?.availableHours || 0)-(b.at(-1)?.availableHours || 0);
+      return (def.level===8?b.reduce((sum,row)=>sum+row.fit.cpr,0)-a.reduce((sum,row)=>sum+row.fit.cpr,0):0) || uncertain(a)-uncertain(b) || (prefs.releasePreferredIds?b.filter(r=>prefs.releasePreferredIds.includes(r.id)).length-a.filter(r=>prefs.releasePreferredIds.includes(r.id)).length:0) || a.filter(r=>r.availableHours===0).length-b.filter(r=>r.availableHours===0).length || (a.at(-1)?.availableHours || 0)-(b.at(-1)?.availableHours || 0);
     }
     const states=new Map([[0,[]]]);
     for(const {member,hours} of [...pool.values()].sort((a,b)=>a.hours-b.hours || Number(a.member.id)-Number(b.member.id))){
@@ -3749,7 +3753,7 @@
     }
     const roster=blRoster();
     const sortRows=rows=>[...(rows || [])].sort((a,b)=>JSON.stringify(canonical(a)).localeCompare(JSON.stringify(canonical(b))));
-    return plannerReviewDigest(JSON.stringify(canonical({planningStrategy:'lower-level-paired-role-trials-v28',
+    return plannerReviewDigest(JSON.stringify(canonical({planningStrategy:'release-aware-new-start-forecast-v29',
       crimes:sortRows((state.crimes || []).map(c=>({id:c.id,name:c.name,difficulty:c.difficulty,status:c.status,isExpiring:c.isExpiring,ready_at:c.ready_at,expired_at:c.expired_at,slots:c.slots}))),
       members:sortRows(state.members),profiles:sortRows(state.profiles),weights:state.weights,targetPolicy:state.targetPolicy,learning:state.learning,
       levels:plannerSelectedLevels(prefs).sort((a,b)=>a-b),includeStale:prefs.includeStale===true,
@@ -5138,12 +5142,57 @@
     }catch(error){return {...needed,crews:[],groups:[],trackingError:'Spawn tracking could not be saved. Resolve storage or sync, then scan again.'};}
   }
 
-  function plannerSpawnSummaryCard(needed,state,plan,prefs) {
+  function plannerSpawnSummaryCard(needed,state,plan,prefs,releaseStart=null) {
+    if(!needed.crews.length && !needed.trackingError && releaseStart)return '<strong>Wait for crew release — reassess one '+escapeHtml(releaseStart.label)+' start</strong><p>Earliest assessed start: '+escapeHtml(new Date(releaseStart.startAt).toLocaleString('en-GB',{timeZone:'Europe/London',hour12:false}))+'. Confirm completion, run Fresh shared scan and recheck Scope first. This forecast does not authorise spending or assign hypothetical roles.</p>';
     const decision=plannerSpawnQuantityDecision(needed,state,plan,prefs);
     const quantity=(needed.groups || []).map(g=>`${g.count} × ${g.label}`).join(' · ');
     const title=needed.trackingError?'Wait — scan before spawning':needed.crews.length?(decision.allowed?'Spawn ':'Wait — ')+quantity:'No new OCs to spawn now';
     const reason=needed.trackingError || (needed.crews.length && decision.allowed?'Spawn one, then Scan OCs. The remaining quantity updates after the scan.':needed.crews.length?decision.reason.split(/\.(?:\s|$)/)[0]+'.':needed.fulfilled?'The previous spawn request is covered.': 'No additional bracket has confirmed crew coverage.');
     return '<strong>'+escapeHtml(title)+'</strong><p>'+escapeHtml(reason)+'</p>';
+  }
+
+  function plannerReleaseStart(state,plan,prefs,unusedNow,unusedSoon) {
+    const asOf=state.scannedAt,hour=3600000;
+    if(!state.shared || !state.complete || !Number.isFinite(asOf) || Date.now()<asOf || Date.now()-asOf>=300000 || plan.spawningBlocked || !unusedNow.length)return null;
+    const reserved=new Set([...plan.now.keys(),...plan.next.keys(),...(plan.coverageReservations?.keys() || []),...(plan.mailedHeld || [])].map(String));
+    const current=unusedNow.filter(member=>member.is_in_oc===false && member.ocEligible!==false && (!member.status?.state || member.status.state==='Okay') && !reserved.has(String(member.id)));
+    const releases=(plan.active.releases?.rows || []).filter(row=>row.kind==='scanned' && Number.isFinite(row.expectedAt) && row.expectedAt>=asOf && row.expectedAt<=asOf+24*hour);
+    const arrivals=unusedSoon.map(member=>({member,ready:plan.active.soon.get(String(member.id))})).filter(({member,ready})=>member.is_in_oc===true && member.ocEligible!==false && (!member.status?.state || member.status.state==='Okay') && !reserved.has(String(member.id)) && ready && releases.some(release=>release.crimeId===String(ready.crimeId) && release.expectedAt===ready.readyAt && release.memberIds.includes(String(member.id))));
+    if(!current.length || !arrivals.length)return null;
+    const cache=plannerReleaseStart.cache || (plannerReleaseStart.cache=new WeakMap());
+    if(!cache.has(state))cache.set(state,new Map());
+    const budgetAge=Math.max(asOf,Date.now())-Number(prefs.spawnBudget?.updatedAt);
+    const memo=cache.get(state),memoKey=JSON.stringify([prefs.levels,prefs.includeStale,prefs.spawnBudget,budgetAge>=0 && budgetAge<=15*60000,prefs.learning,[...reserved].sort(),current.map(member=>String(member.id)),arrivals.map(row=>[String(row.member.id),row.ready.readyAt])]);
+    if(memo.has(memoKey))return memo.get(memoKey);
+    const highEndBlocked=(state.crimes || []).some(crime=>(Number(crime.difficulty) || plan.defs[crime.name]?.level)===8 && ['recruiting','planning'].includes(crime.status));
+    const preferred=current.map(member=>String(member.id));
+    const maxAge=typeof PLANNER_MAX_AGE==='number'?PLANNER_MAX_AGE:30*86400000;
+    for(const startAt of [...new Set(arrivals.map(row=>row.ready.readyAt))].sort((a,b)=>a-b)){
+      const ready=current.concat(arrivals.filter(row=>row.ready.readyAt<=startAt).map(row=>row.member));
+      const later=arrivals.filter(row=>row.ready.readyAt>startAt);
+      const futureHours=Object.fromEntries(later.map(row=>[String(row.member.id),(row.ready.readyAt-startAt)/hour]));
+      const options=plannerPreparation(ready,[{hours:24,members:later.map(row=>row.member)}],plan.defs,{...prefs,asOf:startAt,initialStages:2,spawnBrackets:true,preferFutureFollower:true,releasePreferredIds:preferred,memberReadyHours:futureHours});
+      const candidates=[];
+      for(const level of options.levels){
+        if(level.level>=7 && highEndBlocked || !level.outcomes.length || level.outcomes.some(outcome=>!outcome.daily?.complete || outcome.plannedUncertain!==0 || plannerHistoryAssessment(outcome.crime,prefs.learning || []).weak || outcome.daily.schedule.some(row=>reserved.has(String(row.id)) || row.fit.kind!=='Observed' || !row.fit.seen || row.fit.stale || startAt+row.availableHours*hour-row.fit.seen>maxAge)))continue;
+        const ids=[...new Set(level.outcomes.flatMap(outcome=>outcome.daily.schedule.map(row=>String(row.id))))];
+        const currentIds=preferred.filter(id=>ids.includes(id));if(!currentIds.length)continue;
+        const policy=plannerSpawnDecision({...level,allReliable:true},state,plan,prefs,false);
+        const neededReleases=releases.filter(release=>release.memberIds.some(id=>ids.includes(id)));
+        candidates.push({startAt,level:level.level,label:plannerSpawnLabel(level),ids,currentIds,scopeReady:policy.allowed,scopeReason:policy.reason,canSpendNow:false,conditional:true,
+          releases:neededReleases.map(release=>({crimeId:release.crimeId,crime:release.crime,expectedAt:release.expectedAt,memberIds:release.memberIds.filter(id=>ids.includes(id))})),
+          outcomes:level.outcomes.map(outcome=>({crime:outcome.crime,level:outcome.level,schedule:outcome.daily.schedule.map(row=>({...row,expectedJoinAt:startAt+row.availableHours*hour,joinByAt:startAt+row.joinByHours*hour,currentlyFree:preferred.includes(String(row.id)),name:state.members.find(member=>String(member.id)===String(row.id))?.name || String(row.id)}))}))});
+      }
+      candidates.sort((a,b)=>Number(b.scopeReady)-Number(a.scopeReady) || b.currentIds.length-a.currentIds.length || b.level-a.level);
+      if(candidates.length){memo.set(memoKey,candidates[0]);return candidates[0];}
+    }
+    memo.set(memoKey,null);return null;
+  }
+
+  function plannerReleaseStartCard(forecast) {
+    if(!forecast)return '';
+    const date=time=>new Date(time).toLocaleString('en-GB',{timeZone:'Europe/London',hour12:false});
+    return `<div class="blom-alert blom-release-start"><strong>Conditional start after crew release: one ${escapeHtml(forecast.label)} OC</strong><p>Earliest assessed start: ${escapeHtml(date(forecast.startAt))}. Expected crew releases: ${forecast.releases.map(row=>escapeHtml(row.crime)+' #'+escapeHtml(row.crimeId)+' ('+escapeHtml(date(row.expectedAt))+')').join('; ')}. Before considering a spawn, confirm a qualifying first person is free, run Fresh shared scan and recheck Scope. Later candidates must finish their OCs before joining.</p><p>${forecast.outcomes.length}/${forecast.outcomes.length} possible crimes have two distinct qualifying candidates (one for a single-role OC). The first person may join any qualifying position. Later staffing remains unresolved. The random outcome may leave some current candidates without a role; these are alternatives, not confirmed assignments.</p>${!forecast.scopeReady?`<p class="blom-spawn-warning">Scope/policy review: ${escapeHtml(forecast.scopeReason)}</p>`:''}<details class="blom-inline-details"><summary>Candidate pairs by possible crime</summary>${forecast.outcomes.map(outcome=>`<p><strong>${escapeHtml(outcome.crime)}</strong>: ${outcome.schedule.map(row=>escapeHtml(row.name)+' → '+escapeHtml(prettyRole(row.fit.role))+' ('+formatCpr(row.fit.cpr)+' CPR / '+row.fit.target+'% target; '+(row.currentlyFree?'free now, candidate join from ':'expected free by ')+escapeHtml(date(row.expectedJoinAt))+')').join('; ')}</p>`).join('')}</details></div>`;
   }
 
   function plannerSpareSpawnAssessment(plan,state,prefs) {
@@ -5161,7 +5210,8 @@
     const preparation=needed.assessment;
     needed.highEndHold=(state.crimes || []).some(c=>(Number(c.difficulty) || plan.defs[c.name]?.level)===8 && ['recruiting','planning'].includes(c.status));
     const spawnOpportunity=!needed.crews.length?plannerSpawnOpportunity(preparation,unusedNow,state,plan,prefs):null;
-    return {unusedNow,unusedSoon,needed,preparation,spawnOpportunity};
+    const releaseStart=!needed.crews.length && !needed.trackingError && typeof plannerReleaseStart==='function'?plannerReleaseStart(state,plan,prefs,unusedNow,unusedSoon):null;
+    return {unusedNow,unusedSoon,needed,preparation,spawnOpportunity,releaseStart};
   }
 
   function renderInlineSpawn(model,anchor,unscanned) {
@@ -5175,8 +5225,8 @@
       const prefs={...model.state.prefs,asOf:model.state.scannedAt,spawnBrackets:true,spawnBudget:applyLiveScopeBudget(model.state.prefs),learning:model.state.learning || []};
       const signature=JSON.stringify(prefs.spawnBudget);
       if(model.spawnBudgetSignature!==signature || !model.spawnAssessment){model.spawnAssessment=plannerSpareSpawnAssessment(model.plan,model.state,prefs);model.spawnBudgetSignature=signature;}
-      const {needed}=model.spawnAssessment;
-      html=plannerSpawnSummaryCard(needed,model.state,model.plan,prefs);
+      const {needed,releaseStart}=model.spawnAssessment;
+      html=plannerSpawnSummaryCard(needed,model.state,model.plan,prefs,releaseStart);
 
     }
     if(box.innerHTML!==html)box.innerHTML=html;
@@ -5437,8 +5487,8 @@
         `<div class="blom-placement-note">If you choose to spawn, spawn one and scan again: Torn chooses the actual crime. These counts describe staffing, not success probability. Sent invitations and existing high-level placements are reserved first; existing deadlines take priority over prospective spawn crews.${forecast?' This is a future forecast; wait until those members are actually free.':''} Only selected brackets are assessed. Missing CPR is treated as unknown.</div>`;
       return `<details class="blom-section blom-spawn-section"><summary><span>${escapeHtml(title)}</span>${badge}</summary><div class="blom-section-body">${poolNote}${plannerState.shared?`<div class="blom-spawn-warning">${escapeHtml(decision.reason)}</div>`:''}${body}</div></details>`;
     }
-    const {unusedNow,unusedSoon,needed,preparation,spawnOpportunity}=plannerSpareSpawnAssessment(plan,plannerState,prefs);
-    const workOrders=plannerMemberWorkOrders(plan,{needed},prefs);
+    const {unusedNow,unusedSoon,needed,preparation,spawnOpportunity,releaseStart}=plannerSpareSpawnAssessment(plan,plannerState,prefs);
+    const workOrders=plannerMemberWorkOrders(plan,{needed,releaseStart},prefs);
     const newStartCandidates=workOrders.filter(row=>row.kind==='new-start').length;
     const managerActions=workOrders.filter(row=>row.kind==='manager-action').length;
     function spareMemberOptions(member) {
@@ -5469,17 +5519,18 @@
         const outcomeDetails=outcomes=>outcomes.map(o=>`<div style="padding:8px 0;border-top:1px solid #344650"><strong>${escapeHtml(o.crime)}</strong> · ${o.filled}/${o.total} roles now · ${o.daily.complete?'Crew of '+o.daily.required+' stage'+(o.daily.required===1?'':'s')+' supported':`Next unfilled deadline: +${o.daily.nextDeadline}h`} · ${o.daily.remainingRoles} later roles unresolved${o.missing.length?` · gaps now: ${o.missing.map(prettyRole).map(escapeHtml).join(', ')}`:''}${[...o.plannedCrew].map(([id,fit])=>{const member=[...unusedNow,...unusedSoon].find(m=>String(m.id)===id),soon=plan.active.soon.get(id);return `<div class="blom-placement-meta">${escapeHtml(prettyRole(fit.role))} · ${escapeHtml(member?.name || id)} · ${unusedNow.some(m=>String(m.id)===id)?'Available now':soon?'Expected free in '+escapeHtml(plannerTime(soon.readyAt)):'Future availability unknown'} · join by +${o.daily.schedule.find(row=>row.id===String(id))?.joinByHours ?? '?'}h · ${formatCpr(fit.cpr)} CPR / target ${fit.target}%</div>`;}).join('')}${l.level>=7?`<div class="blom-placement-note">${o.plannedRobust?'Backup crew available':'No confirmed backup crew'}</div>`:''}${o.plannedUncertain?'<div class="blom-spawn-warning">Verify CPR: estimated, stale or undated readings.</div>':''}</div>`).join('');
         return `<tr><td><strong>${plannerSpawnLabel(l)}</strong></td><td><strong>${quantity?'× '+quantity.count:'—'}</strong>${quantity?.partial?`<div class="blom-placement-note">${quantity.partial} conditional</div>`:''}${plans.length?`<details data-bl-disclosure-key="spawn-${l.level}-starters"><summary>Planned starters</summary>${plans.map(c=>{const m=unusedNow.find(m=>String(m.id)===c.starter.id);return `<div>${escapeHtml(m?.name || c.starter.id)} · ${escapeHtml(c.starter.crime)} · ${escapeHtml(prettyRole(c.starter.role))} · ${formatCpr(c.starter.cpr)} CPR</div>`;}).join('')}</details>`:''}</td><td>${plannerScopeCost(l)}</td><td>${l.seeded}/${l.outcomes.length}</td><td>${l.dailyCovered}/${l.outcomes.length}</td><td>${assessment}<details data-bl-disclosure-key="spawn-${l.level}-arrivals"><summary>Starter crews and expected arrivals</summary>${outcomeDetails(l.outcomes)}</details>${plans.length>1?`<details data-bl-disclosure-key="spawn-${l.level}-additional"><summary>Additional planned OCs (${plans.length-1})</summary>${plans.slice(1).map((c,i)=>`<strong>OC ${i+2}${c.partial?' · conditional':''}</strong>${outcomeDetails(c.outcomes)}`).join('')}</details>`:''}</td></tr>`;
       }).join('');
-      return `<section class="blom-section blom-spawn-section"><div class="blom-section-body blom-spawn-summary">${plannerSpawnSummaryCard(needed,plannerState,plan,prefs)}</div><details class="blom-inline-details"><summary>Staffing details</summary><details class="blom-section" open><summary><span>Prepare new OCs</span><span class="blom-mini-badge ${needed.crews.some(c=>c.partial)?'blom-warn':''}">${needed.crews.length?needed.crews.length+' estimated · '+(needed.crews.some(c=>c.partial)?'review gaps':'review Scope'):spawnOpportunity?'Best-fit option · review risk':'No supported start'}</span></summary><div class="blom-section-body">
+      return `<section class="blom-section blom-spawn-section"><div class="blom-section-body blom-spawn-summary">${plannerSpawnSummaryCard(needed,plannerState,plan,prefs,releaseStart)}</div><details class="blom-inline-details"><summary>Staffing details</summary><details class="blom-section" open><summary><span>Prepare new OCs</span><span class="blom-mini-badge ${needed.crews.some(c=>c.partial)?'blom-warn':''}">${needed.crews.length?needed.crews.length+' estimated · '+(needed.crews.some(c=>c.partial)?'review gaps':'review Scope'):releaseStart?'Conditional crew-release plan':spawnOpportunity?'Best-fit option · review risk':'No supported start'}</span></summary><div class="blom-section-body">
         ${needed.highEndHold?'<p class="blom-placement-note">L7–8 spawning held: an L8 already exists. Support that OC first; one L8 at a time.</p>':''}
         <details class="blom-inline-details" data-bl-disclosure-key="spawn-reservations"><summary>Existing reservations</summary><div class="blom-placement-note">${plan.available.filter(m=>plan.coverageReservations?.has(String(m.id))).length} free members and ${[...(plan.coverageReservations?.keys() || [])].filter(id=>!plan.available.some(m=>String(m.id)===id)).length} future arrivals reserved for later stages in existing OCs. These reservations are excluded from new crews.</div>${[...(plan.coverageReservations || new Map())].map(([id,fit])=>`<div class="blom-placement-note">${escapeHtml(plan.upcoming.find(m=>String(m.id)===id)?.name || id)} · L${fit.level} ${escapeHtml(fit.crime)} #${escapeHtml(fit.crimeId)} · ${escapeHtml(prettyRole(fit.role))} · conditional join by ${escapeHtml(plannerTime(fit.joinByAt))}</div>`).join('')}</details>
         ${plan.spawningBlocked?'<div class="blom-alert blom-alert-bad"><strong>Hold new spawns — unresolved checks.</strong> '+(plan.unassessedExisting.length?plan.unassessedExisting.length+' OCs need their levels or definitions checked. ':'')+'Resolve checks that cannot be isolated to held members, then rescan.</div>':plan.assignmentConflicts?.length?'<p class="blom-placement-note">'+plan.assignmentConflicts.length+' invitation issues need review. Affected members remain held out; these new-start plans use only independent spare candidates.</p>':''}
-        ${spawnOpportunity?`<div class="blom-alert blom-spawn-advice"><strong>${spawnOpportunity.decision.allowed?'Best fit to consider: one '+plannerSpawnLabel(spawnOpportunity)+' OC':'Partial coverage: '+plannerSpawnLabel(spawnOpportunity)+' — hold spawning'}</strong><p>${spawnOpportunity.supported.length}/${spawnOpportunity.outcomes.length} possible crimes have a starter and next join. ${spawnOpportunity.ids.length} of ${unusedNow.length} spare members have initial roles across those alternatives: ${unusedNow.filter(m=>spawnOpportunity.ids.includes(String(m.id))).map(m=>escapeHtml(m.name || m.id)).join(', ')}.</p><p class="blom-spawn-warning"><strong>Risk:</strong> no verified starter / next-join pair for ${spawnOpportunity.unsupported.map(escapeHtml).join(', ')}. These counts are coverage, not odds.</p><p>${spawnOpportunity.decision.allowed?'Manual choice: spawn one, then Fresh shared scan to assign the actual roles. Stop and review if the outcome is unsupported.':escapeHtml(spawnOpportunity.decision.reason)}</p><details class="blom-inline-details" data-bl-disclosure-key="spawn-best-fit-roles"><summary>Candidate positions by possible crime</summary>${spawnOpportunity.supported.map(o=>`<p><strong>${escapeHtml(o.crime)}</strong>: ${o.daily.schedule.map(row=>{const member=[...unusedNow,...unusedSoon].find(m=>String(m.id)===String(row.id));return `${escapeHtml(member?.name || row.id)} → ${escapeHtml(prettyRole(row.fit.role))} (${formatCpr(row.fit.cpr)} CPR / ${row.fit.target}% target${unusedNow.some(m=>String(m.id)===String(row.id))?' · now':' · conditional arrival'})`;}).join('; ')}</p>`).join('')}</details></div>`:!needed.crews.length?'<p class="blom-spawn-warning">No supported spawn recommendation. Open the bracket comparison for blockers.</p>':''}
+        ${typeof plannerReleaseStartCard==='function'?plannerReleaseStartCard(releaseStart):''}
+        ${spawnOpportunity?`<div class="blom-alert blom-spawn-advice"><strong>${spawnOpportunity.decision.allowed?'Best fit to consider: one '+plannerSpawnLabel(spawnOpportunity)+' OC':'Partial coverage now: '+plannerSpawnLabel(spawnOpportunity)+' — hold spawning'}</strong><p>${spawnOpportunity.supported.length}/${spawnOpportunity.outcomes.length} possible crimes have a starter and next join. ${spawnOpportunity.ids.length} of ${unusedNow.length} spare members have initial roles across those alternatives: ${unusedNow.filter(m=>spawnOpportunity.ids.includes(String(m.id))).map(m=>escapeHtml(m.name || m.id)).join(', ')}.</p><p class="blom-spawn-warning"><strong>Risk:</strong> no verified starter / next-join pair for ${spawnOpportunity.unsupported.map(escapeHtml).join(', ')}. These counts are coverage, not odds.</p><p>${spawnOpportunity.decision.allowed?'Manual choice: spawn one, then Fresh shared scan to assign the actual roles. Stop and review if the outcome is unsupported.':escapeHtml(spawnOpportunity.decision.reason)}</p><details class="blom-inline-details" data-bl-disclosure-key="spawn-best-fit-roles"><summary>Candidate positions by possible crime</summary>${spawnOpportunity.supported.map(o=>`<p><strong>${escapeHtml(o.crime)}</strong>: ${o.daily.schedule.map(row=>{const member=[...unusedNow,...unusedSoon].find(m=>String(m.id)===String(row.id));return `${escapeHtml(member?.name || row.id)} → ${escapeHtml(prettyRole(row.fit.role))} (${formatCpr(row.fit.cpr)} CPR / ${row.fit.target}% target${unusedNow.some(m=>String(m.id)===String(row.id))?' · now':' · conditional arrival'})`;}).join('; ')}</p>`).join('')}</details></div>`:!needed.crews.length && !releaseStart?'<p class="blom-spawn-warning">No supported spawn recommendation. Open the bracket comparison for blockers.</p>':''}
         ${typeof plannerSpawnQuantityDecision==='function' && needed.crews.length?`<div class="blom-alert blom-spawn-advice">${escapeHtml(plannerSpawnQuantityDecision(needed,plannerState,plan,prefs).reason)}</div>`:''}
         <p><strong>${plan.now.size} assigned to existing OCs · ${unusedNow.length} spare now.</strong> After spawning, scan to assign the actual roles.</p>
         ${unusedNow.length?`<details class="blom-inline-details" data-bl-disclosure-key="spawn-spare-capabilities"><summary>Spare members and recorded levels (${unusedNow.length})</summary>${unusedNow.map(m=>{const capability=plannerLevelFloor(String(m.id),prefs);const options=preparation.levels.filter(l=>l.outcomes.some(o=>o.daily.schedule.some(row=>row.id===String(m.id))));return `<p><strong>${escapeHtml(m.name || m.id)}</strong> · ${capability.highest?'recorded L'+capability.highest:'level unknown'} · ${options.length?'candidate in '+options.map(plannerSpawnLabel).join(', '):'no qualifying initial role — check exact-role CPR'}</p>${plannerSimilarRoleNote(String(m.id),plan,prefs)}`;}).join('')}</details>`:''}
         <details class="blom-inline-details" data-bl-disclosure-key="spawn-compare"><summary>Compare all spawn brackets</summary><div class="blom-planner-scroll"><table class="blom-planner-table"><thead><tr><th>Spawn bracket</th><th>OCs needed</th><th>Scope / OC</th><th>Crime types with starters now</th><th>Initial stages supported</th><th>Preparation plan</th></tr></thead><tbody>${rows || '<tr><td colspan="6">Select at least one crime level and scan to assess new starts.</td></tr>'}</tbody></table></div></details>
         ${needed.crews.length?`<p class="blom-placement-note">Current candidate pool for the proposed spawn${needed.crews.length===1?'':'s'}: ${unusedNow.filter(m=>needed.crews.some(c=>c.ids.includes(String(m.id)))).map(m=>escapeHtml(m.name || m.id)).join(', ')}. Exact roles depend on the crime Torn creates.</p>`:''}
-        ${needed.remaining.length?`<p class="blom-spawn-unplaced">${needed.remaining.length} members still need a placement: ${needed.remaining.map(m=>escapeHtml(m.name || m.id)).join(', ')}. ${spawnOpportunity?'Best-fit option above; exact assignments follow the actual spawn and scan.':'Check candidate positions and CPR in the details.'}</p>`:''}
+        ${needed.remaining.length?`<p class="blom-spawn-unplaced">${needed.remaining.length} members still need a placement: ${needed.remaining.map(m=>escapeHtml(m.name || m.id)).join(', ')}. ${releaseStart?'Conditional release-based plan above; confirm completion and scan before spawning and assigning.':spawnOpportunity?'Best-fit option above; exact assignments follow the actual spawn and scan.':'Check candidate positions and CPR in the details.'}</p>`:''}
         <details class="blom-inline-details" data-bl-disclosure-key="spawn-explanation"><summary>How this assessment works</summary>
         <p class="blom-placement-note">Each row\u2019s coverage assesses the first OC from the same remaining pool; unselected rows are alternatives, not extra spawn requests. Each proposed OC requires a distinct qualifying member for every role in every possible outcome, with a starter now and verified arrivals within 24 hours. Crew coverage remains conditional until members join. Join deadlines still follow consecutive planning stages; candidates do not all need to join before the first gap. Future assignments use arrivals within 24 hours and at most 36 hours of queue waiting after release. Additional soft reservations remain limited to joins within 24 hours; longer waits remain unresolved.</p>
 
@@ -9241,7 +9292,7 @@
       const id=String(member.id),observed=plannerObservation(id,slot.crime,slot.role,true),estimated=observed?null:plannerEstimatedRole(id,slot),match=plannerFit(id,slot,prefs);
       return {member_id:id,slot_key:slot.key,target:mainScriptTarget(slot.crime,slot.level,slot.weight,slot.roleCount,slot.role),level_floor:plannerLevelFloor(id,prefs),observed:observed?fit(observed):null,estimated:estimated?fit(estimated):null,eligible:!!match,owner:owners.get(slot.key) || null};
     }));
-    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || 'unknown'):'1.9.19',exported_at:new Date(now).toISOString(),
+    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.20'):'1.9.20',exported_at:new Date(now).toISOString(),
       snapshot:{...pick(state,['version','complete','shared','revision','scannedAt','scanStartedAt','factionId','viewerId']),
         members:(state.members || []).map(m=>({...pick(m,['id','name','is_in_oc','ocEligible']),status:pick(m.status,['state'])})),
         crimes:(state.crimes || []).map(crime=>({...pick(crime,['id','name','difficulty','status','isExpiring','ready_at','expired_at','pageScan','planningPhase','planningSecondsPerSlot','planningObservedAt']),slots:(crime.slots || []).map(slot=>({...pick(slot,['position','planningPercent','planningState']),position_info:pick(slot.position_info,['label']),user:slot.user===null?null:slot.user?pick(slot.user,['id','name']):undefined,item_requirement:pick(slot.item_requirement,['id'])}))})),
@@ -9249,16 +9300,19 @@
         weights:Object.fromEntries(Object.entries(state.weights || {}).map(([crime,def])=>[crime,{level:Number(def.level),roles:Object.fromEntries(Object.entries(def.roles || {}).filter(([,weight])=>typeof weight==='number' && Number.isFinite(weight)))}])),
         targetPolicy:pick(state.targetPolicy,['schema_version','offset','min','max']),learning:(state.learning || []).map(row=>pick(row,['crime','successes','failures']))},
       preferences:{levels:plannerSelectedLevels(prefs),includeStale:prefs.includeStale===true,asOf:prefs.asOf,spawnBrackets:true,spawnBudget:{...pick(prefs.spawnBudget,['balance','reserve','updatedAt']),knownCrimeIds:(prefs.spawnBudget?.knownCrimeIds || []).map(String).filter(id=>/^\d+$/.test(id))}},
-      plan:{available:plan.available.map(member=>String(member.id)),now:assignments(plan.now),next:assignments(plan.next),coverageReservations:assignments(plan.coverageReservations),mailedHeld:[...plan.mailedHeld].map(String),open:(plan.active.open || []).map(fit),deferred:(plan.deferred || []).map(fit),spawningBlocked:!!plan.spawningBlocked,assignmentConflicts:(plan.assignmentConflicts || []).map(issue=>({...pick(issue,['id','reason','action','canKeep','target','cpr']),destinations:(issue.destinations || []).map(destination=>pick(destination,['crimeId','crime','role']))})),
+      plan:{available:plan.available.map(member=>String(member.id)),now:assignments(plan.now),next:assignments(plan.next),coverageReservations:assignments(plan.coverageReservations),mailedHeld:[...plan.mailedHeld].map(String),open:(plan.active.open || []).map(fit),deferred:(plan.deferred || []).map(fit),releases:(plan.active.releases?.rows || []).map(row=>({...pick(row,['crimeId','crime','status','expectedAt','kind','reason','memberCount','vacancies']),memberIds:(row.memberIds || []).map(String)})),spawningBlocked:!!plan.spawningBlocked,assignmentConflicts:(plan.assignmentConflicts || []).map(issue=>({...pick(issue,['id','reason','action','canKeep','target','cpr']),destinations:(issue.destinations || []).map(destination=>pick(destination,['crimeId','crime','role']))})),
         workOrders:plannerMemberWorkOrders(plan,assessment,prefs).map(row=>({member_id:String(row.member.id),kind:row.kind,priority:row.priority,text:row.text})),eligibility},
+      releaseStart:assessment.releaseStart?{...pick(assessment.releaseStart,['startAt','level','label','scopeReady','scopeReason','canSpendNow','conditional']),currentIds:assessment.releaseStart.currentIds.map(String),releases:assessment.releaseStart.releases.map(row=>({...pick(row,['crimeId','crime','expectedAt']),memberIds:row.memberIds.map(String)})),outcomes:assessment.releaseStart.outcomes.map(outcome=>({crime:outcome.crime,level:outcome.level,schedule:outcome.schedule.map(row=>({...pick(row,['id','name','availableHours','joinByHours','expectedJoinAt','joinByAt','currentlyFree']),fit:fit(row.fit)}))}))}:null,
       spawn:{crews:(assessment.needed.crews || []).map(crew=>({...pick(crew,['label','level','partial','readyHours']),ids:(crew.ids || []).map(String)})),brackets:(assessment.preparation?.levels || []).map(level=>({...pick(level,['level','dailyCovered','seeded']),outcomes:(level.outcomes || []).map(outcome=>({crime:outcome.crime,complete:outcome.daily?.complete===true,uncertain:outcome.plannedUncertain,schedule:(outcome.daily?.schedule || []).map(row=>({member_id:String(row.id),availableHours:row.availableHours,joinByHours:row.joinByHours,fit:fit(row.fit)}))}))}))}};
   }
 
   function plannerDiagnosticSummary(diagnostic) {
     const snapshot=diagnostic.snapshot,plan=diagnostic.plan,names=new Map(snapshot.members.map(member=>[String(member.id),member.name || String(member.id)]));
-    const blocked=plan.workOrders.filter(row=>row.kind==='manager-action'),slots=new Map(plan.open.map(slot=>[slot.key,slot]));
-    const lines=[`Black Ledger planner diagnostic · Manager ${diagnostic.manager_version}`,`Revision ${snapshot.revision} · scan ${new Date(snapshot.scannedAt).toISOString()}`,`${plan.available.length} free · ${plan.now.length} assigned · ${plan.next.length} forecast · ${blocked.length} actions required`,`${snapshot.profiles.length} score records; ${snapshot.profiles.filter(row=>row.last_observed_at).length} dated`,
+    const blocked=plan.workOrders.filter(row=>row.kind!=='assigned'),slots=new Map(plan.open.map(slot=>[slot.key,slot]));
+    const lines=[`Black Ledger planner diagnostic · Manager ${diagnostic.manager_version}`,`Revision ${snapshot.revision} · scan ${new Date(snapshot.scannedAt).toISOString()}`,`${plan.available.length} free · ${plan.now.length} assigned · ${plan.next.length} forecast · ${plan.workOrders.filter(row=>row.kind==='manager-action').length} actions required · ${plan.workOrders.filter(row=>row.kind==='new-start').length} conditional new-start candidates`,`${snapshot.profiles.length} score records; ${snapshot.profiles.filter(row=>row.last_observed_at).length} dated`,
       'Selected levels: '+diagnostic.preferences.levels.join(', ')];
+    for(const release of plan.releases || [])if(release.kind==='scanned')lines.push('Expected full-crew release: '+release.crime+' #'+release.crimeId+' · '+new Date(release.expectedAt).toISOString()+' · '+release.memberIds.map(id=>names.get(String(id)) || id).join(', ')+' · confirm completion before use');
+    if(diagnostic.releaseStart)lines.push('Conditional next start: '+diagnostic.releaseStart.label+' from '+new Date(diagnostic.releaseStart.startAt).toISOString()+'; verify release, Fresh shared scan and Scope before spawning.');
     for(const row of blocked){
       const id=String(row.member_id);lines.push('',`${names.get(id) || id} [${id}]`,row.text);
       for(const profile of snapshot.profiles.filter(profile=>String(profile.user_id)===id))lines.push(`Recorded: ${profile.crime} / ${profile.role}: ${profile.latest_cpr}% · ${profile.last_observed_at || 'undated'}`);
@@ -10563,6 +10617,11 @@
       #${PANEL_ID} .blom-stat strong { display:block !important; color:#f6fbfd !important; font-size:20px !important; line-height:1.05 !important; }
       #${PANEL_ID} .blom-stat span { display:block !important; margin-top:4px !important; color:#aebbc3 !important; font-size:9px !important; line-height:1.15 !important; }
       #${PANEL_ID} .blom-stat-accent { border-color:#4caee2 !important; background:#20303a !important; }
+      #${PANEL_ID} .blom-release-start{color:#eef7ff!important;-webkit-text-fill-color:#eef7ff!important;background:#233641!important;border:1px solid #7daecb!important;overflow-wrap:anywhere!important}
+      #${PANEL_ID} .blom-release-start p,#${PANEL_ID} .blom-release-start strong{color:#eef7ff!important;-webkit-text-fill-color:#eef7ff!important}
+      #${PANEL_ID} .blom-release-start>details>summary{box-sizing:border-box!important;min-height:44px!important;padding:8px!important;color:#eef7ff!important;-webkit-text-fill-color:#eef7ff!important;background:#20303a!important;border:1px solid #607f92!important}
+      #${PANEL_ID} .blom-release-start>details>summary:hover{background:#304958!important}
+      #${PANEL_ID} .blom-release-start>details>summary:focus-visible{outline:2px solid #ffe39c!important;outline-offset:2px!important}
       #${PANEL_ID} .blom-planner-diagnostic-result{display:block!important;box-sizing:border-box!important;width:100%!important;margin:10px 0!important;padding:12px!important;color:#eef7ff!important;-webkit-text-fill-color:#eef7ff!important;background:#1d2c35!important;border:1px solid #67b7e4!important;border-radius:8px!important;overflow-wrap:anywhere!important}
       #${PANEL_ID} .blom-planner-diagnostic-result p,#${PANEL_ID} .blom-planner-diagnostic-result strong{color:#eef7ff!important;-webkit-text-fill-color:#eef7ff!important}
       #${PANEL_ID} .blom-diagnostic-actions{display:flex!important;gap:8px!important;flex-wrap:wrap!important;margin:10px 0!important}
