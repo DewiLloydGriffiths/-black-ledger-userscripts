@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.13
+// @version      1.9.14
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -3035,7 +3035,24 @@
         // Heuristic allowances, not a calibrated prediction: 2 points at the
         // same/lower destination level, 7 points when stepping up one level.
         const allowance=delta>0?7:2;
-        candidates.push({cpr:Math.max(0,observed.cpr-allowance),source:`Provisional estimate from L${def.level} ${crime} / ${role}: ${observed.cpr}% minus ${allowance} points; verify destination CPR after joining`,kind:'Estimated',seen:observed.seen,stale:false,confidence:'Low · provisional',estimatedFrom:{crime,role,level:Number(def.level),cpr:observed.cpr,allowance}});
+        // Calibrate against distinct peers with measured readings at both ends.
+        // Use nearby source scores and a conservative lower quartile of deltas;
+        // a small or inconsistent sample retains the explicit heuristic fallback.
+        const peers=typeof plannerInputContext!=='undefined' && plannerInputContext?.shared?plannerInputContext.members || []:[];
+        const differences=[],seenPeers=new Set();
+        for(const peer of peers){
+          const id=String(peer.id);if(id===String(memberId) || seenPeers.has(id))continue;seenPeers.add(id);
+          const from=plannerObservation(id,crime,role,false),to=plannerObservation(id,slot.crime,slot.role,false);
+          const measured=value=>value?.kind==='Observed' && value.seen && !value.stale && Number.isFinite(value.cpr) && value.cpr>=0 && value.cpr<=100;
+          if(!measured(from) || !measured(to) || Math.abs(from.cpr-observed.cpr)>10)continue;
+          differences.push(to.cpr-from.cpr);
+        }
+        differences.sort((a,b)=>a-b);
+        const calibrated=differences.length>=3 && differences.at(-1)-differences[0]<=10;
+        const adjustment=calibrated?differences[Math.floor((differences.length-1)*0.25)]-2:-allowance;
+        const cpr=Math.max(0,Math.min(100,observed.cpr+adjustment));
+        const evidence=calibrated?`${differences.length} paired peers within 10 source CPR points; lower-quartile destination difference ${adjustment+2}, minus 2-point planning margin`:`heuristic minus ${allowance} points (insufficient consistent paired peer evidence)`;
+        candidates.push({cpr,source:`Provisional estimate from L${def.level} ${crime} / ${role}: ${observed.cpr}%; ${evidence}; verify destination CPR after joining`,kind:'Estimated',seen:observed.seen,stale:false,confidence:'Low · provisional',estimatedFrom:{crime,role,level:Number(def.level),cpr:observed.cpr,allowance,method:calibrated?'paired-peers':'heuristic',peerCount:differences.length,adjustment}});
       }
     }
     // Prefer the closest level; use the lowest estimate when sources disagree.
@@ -3684,7 +3701,7 @@
     }
     const roster=blRoster();
     const sortRows=rows=>[...(rows || [])].sort((a,b)=>JSON.stringify(canonical(a)).localeCompare(JSON.stringify(canonical(b))));
-    return plannerReviewDigest(JSON.stringify(canonical({planningStrategy:'all-member-work-orders-48h-v24',
+    return plannerReviewDigest(JSON.stringify(canonical({planningStrategy:'paired-peer-role-estimates-v25',
       crimes:sortRows((state.crimes || []).map(c=>({id:c.id,name:c.name,difficulty:c.difficulty,status:c.status,isExpiring:c.isExpiring,ready_at:c.ready_at,expired_at:c.expired_at,slots:c.slots}))),
       members:sortRows(state.members),profiles:sortRows(state.profiles),weights:state.weights,targetPolicy:state.targetPolicy,learning:state.learning,
       levels:plannerSelectedLevels(prefs).sort((a,b)=>a-b),includeStale:prefs.includeStale===true,
