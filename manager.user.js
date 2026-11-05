@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.18
+// @version      1.9.19
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -9241,7 +9241,7 @@
       const id=String(member.id),observed=plannerObservation(id,slot.crime,slot.role,true),estimated=observed?null:plannerEstimatedRole(id,slot),match=plannerFit(id,slot,prefs);
       return {member_id:id,slot_key:slot.key,target:mainScriptTarget(slot.crime,slot.level,slot.weight,slot.roleCount,slot.role),level_floor:plannerLevelFloor(id,prefs),observed:observed?fit(observed):null,estimated:estimated?fit(estimated):null,eligible:!!match,owner:owners.get(slot.key) || null};
     }));
-    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || 'unknown'):'1.9.18',exported_at:new Date(now).toISOString(),
+    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || 'unknown'):'1.9.19',exported_at:new Date(now).toISOString(),
       snapshot:{...pick(state,['version','complete','shared','revision','scannedAt','scanStartedAt','factionId','viewerId']),
         members:(state.members || []).map(m=>({...pick(m,['id','name','is_in_oc','ocEligible']),status:pick(m.status,['state'])})),
         crimes:(state.crimes || []).map(crime=>({...pick(crime,['id','name','difficulty','status','isExpiring','ready_at','expired_at','pageScan','planningPhase','planningSecondsPerSlot','planningObservedAt']),slots:(crime.slots || []).map(slot=>({...pick(slot,['position','planningPercent','planningState']),position_info:pick(slot.position_info,['label']),user:slot.user===null?null:slot.user?pick(slot.user,['id','name']):undefined,item_requirement:pick(slot.item_requirement,['id'])}))})),
@@ -9254,6 +9254,53 @@
       spawn:{crews:(assessment.needed.crews || []).map(crew=>({...pick(crew,['label','level','partial','readyHours']),ids:(crew.ids || []).map(String)})),brackets:(assessment.preparation?.levels || []).map(level=>({...pick(level,['level','dailyCovered','seeded']),outcomes:(level.outcomes || []).map(outcome=>({crime:outcome.crime,complete:outcome.daily?.complete===true,uncertain:outcome.plannedUncertain,schedule:(outcome.daily?.schedule || []).map(row=>({member_id:String(row.id),availableHours:row.availableHours,joinByHours:row.joinByHours,fit:fit(row.fit)}))}))}))}};
   }
 
+  function plannerDiagnosticSummary(diagnostic) {
+    const snapshot=diagnostic.snapshot,plan=diagnostic.plan,names=new Map(snapshot.members.map(member=>[String(member.id),member.name || String(member.id)]));
+    const blocked=plan.workOrders.filter(row=>row.kind==='manager-action'),slots=new Map(plan.open.map(slot=>[slot.key,slot]));
+    const lines=[`Black Ledger planner diagnostic · Manager ${diagnostic.manager_version}`,`Revision ${snapshot.revision} · scan ${new Date(snapshot.scannedAt).toISOString()}`,`${plan.available.length} free · ${plan.now.length} assigned · ${plan.next.length} forecast · ${blocked.length} actions required`,`${snapshot.profiles.length} score records; ${snapshot.profiles.filter(row=>row.last_observed_at).length} dated`,
+      'Selected levels: '+diagnostic.preferences.levels.join(', ')];
+    for(const row of blocked){
+      const id=String(row.member_id);lines.push('',`${names.get(id) || id} [${id}]`,row.text);
+      for(const profile of snapshot.profiles.filter(profile=>String(profile.user_id)===id))lines.push(`Recorded: ${profile.crime} / ${profile.role}: ${profile.latest_cpr}% · ${profile.last_observed_at || 'undated'}`);
+      for(const check of plan.eligibility.filter(check=>check.member_id===id)){
+        const slot=slots.get(check.slot_key);if(!slot || slot.level<check.level_floor.minimum)continue;
+        const evidence=check.observed || check.estimated;
+        const owner=check.owner?` · held by ${names.get(check.owner.member_id) || check.owner.member_id} (${check.owner.sent?'sent':check.owner.future?'forecast':'unsent current'})`:'';
+        lines.push(`L${slot.level} ${slot.crime} #${slot.crimeId} / ${slot.role}: ${evidence?evidence.cpr+'% '+evidence.kind:'no usable score/estimate'} / target ${check.target}%${owner}${slot.openingUnsupported?' · opening held':''}`);
+        if(evidence?.source)lines.push('  '+evidence.source);
+      }
+    }
+    return lines.join('\n');
+  }
+
+  function showPlannerDiagnostic(diagnostic,filename) {
+    const button=document.getElementById('blom-export-planner');
+    if(!button)throw new Error('Open the Data tab and export again.');
+    document.getElementById('blom-planner-diagnostic-result')?.remove();
+    const box=document.createElement('section');box.id='blom-planner-diagnostic-result';box.className='blom-planner-diagnostic-result';
+    const heading=document.createElement('strong');heading.textContent='Planner diagnostic ready';box.appendChild(heading);
+    const description=document.createElement('p');description.textContent='If PDA does not save the download, copy the summary below and paste it into this chat. You can also share the full JSON file when supported.';box.appendChild(description);
+    const status=document.createElement('p');status.setAttribute('role','status');status.setAttribute('aria-live','polite');box.appendChild(status);
+    const summary=document.createElement('textarea');summary.readOnly=true;summary.rows=10;summary.setAttribute('aria-label','Planner diagnostic summary');summary.value=plannerDiagnosticSummary(diagnostic);
+    const actions=document.createElement('div');actions.className='blom-diagnostic-actions';box.appendChild(actions);
+    const action=(label,fn)=>{const node=document.createElement('button');node.type='button';node.className='blom-primary';node.textContent=label;node.addEventListener('click',fn);actions.appendChild(node);return node;};
+    action('Copy diagnostic summary',async()=>{
+      try{if(!navigator.clipboard?.writeText)throw new Error('Clipboard unavailable');await navigator.clipboard.writeText(summary.value);status.textContent='Summary copied. Paste it into this chat.';}
+      catch(_){summary.focus();summary.select();summary.setSelectionRange(0,summary.value.length);status.textContent='Summary selected. Use your device Copy command, then paste it into this chat.';}
+    });
+    const download=()=>{try{downloadJSON(diagnostic,filename);status.textContent='Diagnostic ready; download requested. If no file appears in PDA, use Copy diagnostic summary.';}catch(_){status.textContent='This app could not download the file. Use Copy diagnostic summary below.';}};
+    action('Download JSON again',download);
+    try{
+      const file=typeof File==='function'?new File([JSON.stringify(diagnostic,null,2)],filename,{type:'application/json'}):null;
+      if(file && typeof navigator.share==='function' && typeof navigator.canShare==='function' && navigator.canShare({files:[file]}))action('Share JSON file',async()=>{
+        try{await navigator.share({files:[file],title:'Black Ledger planner diagnostic'});status.textContent='File shared. You can attach it to this chat.';}
+        catch(error){status.textContent=error?.name==='AbortError'?'Sharing cancelled. The diagnostic is still available below.':'Sharing is unavailable here. Use Copy diagnostic summary.';}
+      });
+    }catch(_){}
+    box.appendChild(summary);button.insertAdjacentElement('afterend',box);download();
+    box.scrollIntoView({block:'nearest'});
+  }
+
   function exportPlannerDiagnostic() {
     const model=inlinePlannerModel();
     if(!model){alert('Run Fresh shared scan on the OC page, then export the planner diagnostic within five minutes.');return;}
@@ -9262,7 +9309,7 @@
       const prefs={...model.state.prefs,asOf:model.state.scannedAt,spawnBrackets:true,spawnBudget:applyLiveScopeBudget(model.state.prefs),learning:model.state.learning || []};
       const assessment=plannerSpareSpawnAssessment(model.plan,model.state,prefs);
       const diagnostic=plannerDiagnosticExport(model.state,model.plan,prefs,assessment);
-      downloadJSON(diagnostic,'black_ledger_planner_diagnostic_'+new Date().toISOString().slice(0,10)+'.json');
+      showPlannerDiagnostic(diagnostic,'black_ledger_planner_diagnostic_'+new Date().toISOString().slice(0,10)+'.json');
     }catch(error){alert('Could not export planner diagnostic: '+String(error.message || error));}
     finally{plannerInputContext=previous;}
   }
@@ -10516,6 +10563,14 @@
       #${PANEL_ID} .blom-stat strong { display:block !important; color:#f6fbfd !important; font-size:20px !important; line-height:1.05 !important; }
       #${PANEL_ID} .blom-stat span { display:block !important; margin-top:4px !important; color:#aebbc3 !important; font-size:9px !important; line-height:1.15 !important; }
       #${PANEL_ID} .blom-stat-accent { border-color:#4caee2 !important; background:#20303a !important; }
+      #${PANEL_ID} .blom-planner-diagnostic-result{display:block!important;box-sizing:border-box!important;width:100%!important;margin:10px 0!important;padding:12px!important;color:#eef7ff!important;-webkit-text-fill-color:#eef7ff!important;background:#1d2c35!important;border:1px solid #67b7e4!important;border-radius:8px!important;overflow-wrap:anywhere!important}
+      #${PANEL_ID} .blom-planner-diagnostic-result p,#${PANEL_ID} .blom-planner-diagnostic-result strong{color:#eef7ff!important;-webkit-text-fill-color:#eef7ff!important}
+      #${PANEL_ID} .blom-diagnostic-actions{display:flex!important;gap:8px!important;flex-wrap:wrap!important;margin:10px 0!important}
+      #${PANEL_ID} .blom-diagnostic-actions button{min-height:44px!important;white-space:normal!important;color:#eef7ff!important;-webkit-text-fill-color:#eef7ff!important;background:#245b7c!important;border:1px solid #67b7e4!important}
+      #${PANEL_ID} .blom-diagnostic-actions button:hover{background:#307395!important}
+      #${PANEL_ID} .blom-diagnostic-actions button:focus-visible,#${PANEL_ID} .blom-planner-diagnostic-result textarea:focus-visible{outline:2px solid #ffe39c!important;outline-offset:2px!important}
+      #${PANEL_ID} .blom-diagnostic-actions button:disabled{color:#d3dde5!important;-webkit-text-fill-color:#d3dde5!important;background:#374b59!important;border-color:#708694!important;opacity:1!important}
+      #${PANEL_ID} .blom-planner-diagnostic-result textarea{display:block!important;box-sizing:border-box!important;width:100%!important;max-width:100%!important;min-height:180px!important;padding:9px!important;background:#101d25!important;color:#eef7ff!important;-webkit-text-fill-color:#eef7ff!important;border:1px solid #6b8a9d!important;white-space:pre-wrap!important;font:12px/1.5 monospace!important}
       #${PANEL_ID} #blom-export-planner{color:#eef7ff!important;-webkit-text-fill-color:#eef7ff!important;background:#245b7c!important;border:1px solid #67b7e4!important;min-height:44px!important;white-space:normal!important;overflow-wrap:anywhere!important}
       #${PANEL_ID} #blom-export-planner:hover{background:#307395!important}
       #${PANEL_ID} #blom-export-planner:focus-visible{outline:2px solid #ffe39c!important;outline-offset:2px!important}
