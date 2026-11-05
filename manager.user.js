@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.14
+// @version      1.9.15
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -2891,10 +2891,11 @@
     if(assessment.needed.trackingError)return {kind:'needs-review',text:assessment.needed.trackingError};
     const id=String(member.id),crews=assessment.needed.crews.filter(crew=>crew.ids.includes(id));
     if(crews.length)return {kind:'new-start',text:'Proposed new-OC candidate: '+[...new Set(crews.map(crew=>crew.label))].join(', ')+'. Review Scope and spawn one, then scan its actual roles; this is conditional until the OC exists.'};
-    if(plan.idleL8Fallback?.issues.has(id))return {kind:'needs-fit',text:plan.idleL8Fallback.issues.get(id)};
     const fits=(plan.active.open || []).filter(slot=>plannerFit(id,slot,prefs));
     const used=new Set([...plan.now.values(),...plan.next.values()].map(fit=>fit.key));
-    if(fits.some(slot=>!slot.openingUnsupported))return {kind:'next-review',text:'Suitable role evidence exists, but next conveyor joins are covered or not due. Keep later slots open for finishers; review a parallel start instead of joining a multi-day queue.'};
+    if(fits.some(slot=>!slot.openingUnsupported && !used.has(slot.key)))return {kind:'next-review',text:'Qualifying role evidence exists, but this role is held by opening support or unresolved timing checks. Review the OC timer and starter/follower support, then rescan.'};
+    if(fits.some(slot=>!slot.openingUnsupported))return {kind:'next-review',text:'The qualifying existing roles are already allocated to other current or forecast members. Preserve those commitments; assess another suitable existing vacancy or supported start.'};
+    if(plannerLevelFloor(id,prefs).highest>=7 && plan.idleL8Fallback?.issues.has(id))return {kind:'needs-fit',text:plan.idleL8Fallback.issues.get(id)};
     const held=fits.find(slot=>!used.has(slot.key) && slot.openingUnsupported);
     if(held)return {kind:'held',text:held.openingHoldReason || 'A suitable role exists, but this empty OC lacks a distinct timely follower. Review the starter/follower pair.'};
     if(assessment.needed.fulfilled)return {kind:'needs-review',text:'The previous spawn request is accounted for. Review the actual new OCs and scan after joins; another new start is not currently requested for this pool.'};
@@ -2907,8 +2908,8 @@
     return plan.available.map(member=>{
       const id=String(member.id),fit=plan.now.get(id);
       if(fit){
-        const priority=fit.idleL8Fallback?4:(fit.assignmentPriority || 1);
-        return {member,priority,kind:'assigned',text:(priority===4?'Last-resort L8 placement':priority===3?'Start an existing OC':priority===2?'Cover an existing stage within 48 hours':'Cover an urgent existing gap')+': '+fit.crime+' — '+prettyRole(fit.role)+'. Review and join the assigned role.'};
+        const priority=fit.idleL8Fallback || fit.idleExistingFallback?4:(fit.assignmentPriority || 1);
+        return {member,priority,kind:'assigned',text:(priority===4?(fit.idleExistingFallback?'Last-resort existing OC placement':'Last-resort L8 placement'):priority===3?'Start an existing OC':priority===2?'Cover an existing stage within 48 hours':'Cover an urgent existing gap')+': '+fit.crime+' — '+prettyRole(fit.role)+'. Review and join the assigned role.'};
       }
       if(plan.mailedHeld?.has(id))return {member,priority:5,kind:'manager-action',text:'Manager action required: review the outstanding invitation for this member before issuing a different assignment.'};
       if(member.status?.state && member.status.state!=='Okay')return {member,priority:5,kind:'manager-action',text:'Manager action required: member is currently '+member.status.state+'. Resolve availability and rescan before assigning a role.'};
@@ -3701,7 +3702,7 @@
     }
     const roster=blRoster();
     const sortRows=rows=>[...(rows || [])].sort((a,b)=>JSON.stringify(canonical(a)).localeCompare(JSON.stringify(canonical(b))));
-    return plannerReviewDigest(JSON.stringify(canonical({planningStrategy:'paired-peer-role-estimates-v25',
+    return plannerReviewDigest(JSON.stringify(canonical({planningStrategy:'idle-existing-role-fallback-v26',
       crimes:sortRows((state.crimes || []).map(c=>({id:c.id,name:c.name,difficulty:c.difficulty,status:c.status,isExpiring:c.isExpiring,ready_at:c.ready_at,expired_at:c.expired_at,slots:c.slots}))),
       members:sortRows(state.members),profiles:sortRows(state.profiles),weights:state.weights,targetPolicy:state.targetPolicy,learning:state.learning,
       levels:plannerSelectedLevels(prefs).sort((a,b)=>a-b),includeStale:prefs.includeStale===true,
@@ -3963,6 +3964,29 @@
     return {held,level,count:supported.length,starterOnly:true};
   }
 
+  function plannerIdleExistingFallback(state,plan,prefs) {
+    const result={placements:new Map(),spawnProtected:new Set()};
+    if(!state.shared || !Number.isFinite(state.scannedAt) || Date.now()-state.scannedAt<0 || Date.now()-state.scannedAt>300000)return result;
+    const committed=new Map([...plan.now,...plan.next,...plan.coverageReservations]);
+    const idle=plan.available.filter(member=>!committed.has(String(member.id)) && !plan.mailedHeld.has(String(member.id)) && member.ocEligible!==false && (!member.status?.state || member.status.state==='Okay'));
+    const used=new Set([...committed.values()].map(fit=>fit.key));
+    // This exception extends existing running queues only. Empty openings retain
+    // their initial pair cap; L8 retains its separate single-OC fallback.
+    const slots=plan.active.open.filter(slot=>slot.level<8 && !slot.opening && !slot.openingUnsupported && !used.has(slot.key) && Number.isFinite(slot.stallAt) && slot.expiresAt>prefs.asOf);
+    if(!idle.length || !slots.length)return result;
+    const future=plan.upcoming.filter(member=>!committed.has(String(member.id)) && !plan.mailedHeld.has(String(member.id)));
+    const memberReadyHours=Object.fromEntries(future.map(member=>[String(member.id),Math.max(0,(plan.active.soon.get(String(member.id)).readyAt-prefs.asOf)/3600000)]));
+    const highEndSpawnBlocked=state.crimes.some(crime=>(Number(crime.difficulty) || plan.defs[crime.name]?.level)===8 && ['recruiting','planning'].includes(crime.status));
+    let needed=plannerSpawnNeeded(idle,plan.defs,{...prefs,spawningBlocked:plan.spawningBlocked,highEndSpawnBlocked,memberReadyHours},plan.protectedHigh,[{hours:24,members:future}]);
+    needed=plannerTrackSpawnDemand(needed,state,plan,prefs);
+    for(const crew of needed.crews)if(plannerSpawnQuantityDecision({...needed,crews:[crew]},state,plan,prefs).allowed)
+      for(const id of crew.ids)result.spawnProtected.add(String(id));
+    const candidates=idle.filter(member=>!result.spawnProtected.has(String(member.id)));
+    const matched=plannerAssignStaged(candidates,slots,{...prefs,maxOpeningStages:2},new Map(),committed);
+    for(const [id,fit] of matched)result.placements.set(id,{...fit,idleExistingFallback:true,assignmentPriority:4});
+    return result;
+  }
+
   function plannerIdleL8Fallback(state,plan,prefs) {
     const result={placements:new Map(),spawnProtected:new Set(),issues:new Map(),crimeId:null};
     if(!state.shared || !Number.isFinite(state.scannedAt) || Date.now()-state.scannedAt<0 || Date.now()-state.scannedAt>300000)return result;
@@ -4135,9 +4159,13 @@
     const spawningBlocked=unassessedExisting.length>0 || assignmentConflicts.some(issue=>!issue.id || !mailedHeld.has(String(issue.id)));
     const plan={ available, now, upcoming, next, active, defs, forecast, protectedHigh, deferred, spawnReservation, assignmentConflicts, mailedHeld, acceptedInvitations, coverageReservations, staffingRisks, unassessedExisting, spawningBlocked };
     if(state.shared){
+      if(typeof plannerIdleExistingFallback==='function'){
+        plan.idleExistingFallback=plannerIdleExistingFallback(state,plan,prefs);
+        for(const [id,fit] of plan.idleExistingFallback.placements)now.set(id,fit);
+      }
       plan.idleL8Fallback=plannerIdleL8Fallback(state,plan,prefs);
       for(const [id,fit] of plan.idleL8Fallback.placements)now.set(id,fit);
-      if(plan.idleL8Fallback.placements.size){
+      if(plan.idleL8Fallback.placements.size || plan.idleExistingFallback?.placements.size){
         const filled=new Set([...now.values(),...next.values()].map(fit=>fit.key));
         plan.deferred=deferred.filter(slot=>!filled.has(slot.key));
         plan.staffingRisks=staffingRisks.filter(slot=>!filled.has(slot.key));
@@ -5260,6 +5288,7 @@
         ${!fit.startable && fit.conditionalPlanning && Number.isFinite(fit.joinByAt)?`<div class="blom-placement-note">Next conveyor join; future-assignment members must finish their current OC first. Latest planned join: ${escapeHtml(new Date(fit.joinByAt).toLocaleString('en-GB',{timeZone:'Europe/London',hour12:false}))}. Depends on earlier planned joins happening; rescan after each join.</div>`:''}
         ${Number.isFinite(fit.queueWaitHours)?`<div class="blom-placement-note">Expected queue wait after becoming available: ${fit.queueWaitHours.toFixed(1)} hours. Stage timing is conditional on earlier joins.</div>`:''}
         ${fit.l8Shortfall?`<div class="blom-placement-note">L8 near-target allowance: ${formatCpr(fit.cpr)}% CPR / ${fit.target}% target · ${fit.l8Shortfall} point(s) below, within the 3-point allowance.</div>`:''}
+        ${fit.idleExistingFallback?`<div class="blom-placement-note">Last-resort existing OC placement: no supported spendable new start is reserved for this member. Join this qualifying role now; the queue may exceed 48 hours. Estimated stage wait: ${Number.isFinite(fit.queueWaitHours)?fit.queueWaitHours.toFixed(1)+' hours':'unknown'}. Timing depends on earlier joins; rescan after joining.</div>`:''}
         ${fit.idleL8Fallback?`<div class="blom-placement-note">Last-resort L8 placement: no supported spendable new start was reserved for this member. Estimated planning queue wait: ${Number.isFinite(fit.queueWaitHours)?fit.queueWaitHours.toFixed(1)+' hours':'unknown; check the OC timer'}. This intentionally uses a later L8 role instead of leaving the member idle.</div>`:''}
         ${fit.itemId?`<div class="blom-placement-note blom-item-warning">Check required item #${escapeHtml(fit.itemId)}</div>`:''}`;
     }
@@ -5353,7 +5382,7 @@
         <details class="blom-inline-details" data-bl-disclosure-key="spawn-explanation"><summary>How this assessment works</summary>
         <p class="blom-placement-note">Each row\u2019s coverage assesses the first OC from the same remaining pool; unselected rows are alternatives, not extra spawn requests. Each proposed OC requires a distinct qualifying member for every role in every possible outcome, with a starter now and verified arrivals within 24 hours. Crew coverage remains conditional until members join. Join deadlines still follow consecutive planning stages; candidates do not all need to join before the first gap. Future assignments use arrivals within 24 hours and at most 36 hours of queue waiting after release. Additional soft reservations remain limited to joins within 24 hours; longer waits remain unresolved.</p>
 
-        <p class="blom-muted">Existing sent invitations remain commitments. Cover the next required join, prefer timely finishers as followers, and spread other free members across supported starts. Do not fill multi-day planning queues. Quantities account for a starter and one distinct next join per OC; later roles remain unresolved and future arrivals are conditional. Forecasts are conditional and not permission to spend Scope. Partial starter coverage is evidence only and adds zero to OCs needed. Torn may choose a crime these starters cannot join; do not keep spawning to obtain a particular crime. Spawn one, check its actual roles and rescan before the next. Future completion times may change.</p>
+        <p class="blom-muted">Existing sent invitations remain commitments. Cover the next required join, prefer timely finishers as followers, and spread other free members across supported starts. Prefer supported starts and timely finishers; otherwise-idle members may join qualifying existing queues with their wait shown. Quantities account for a starter and one distinct next join per OC; later roles remain unresolved and future arrivals are conditional. Forecasts are conditional and not permission to spend Scope. Partial starter coverage is evidence only and adds zero to OCs needed. Torn may choose a crime these starters cannot join; do not keep spawning to obtain a particular crime. Spawn one, check its actual roles and rescan before the next. Future completion times may change.</p>
         </details>
       </div></details></details></section>`;
     }
@@ -5408,7 +5437,7 @@
       <details class="blom-section blom-main-section" tabindex="-1" open>
         <summary><span>Optimised assignments</span><span class="blom-mini-badge blom-good">${allAssignmentGroups.length} OC${allAssignmentGroups.length===1?'':'s'}</span></summary>
         <div class="blom-section-body">
-          <div class="blom-section-intro">${plan.available.length} free now: ${plan.now.size} assigned roles · ${newStartCandidates} proposed new-start candidates · ${managerActions} manager actions required. ${plan.next.size} future assignments are members still in other OCs. Priority: urgent existing gaps → existing stages within 48 hours → supported starts → single-L8 fallback. Every free member has a work order below. Only actual allocated roles are included in messages; new starts require Scope review, spawning and a fresh scan.</div>
+          <div class="blom-section-intro">${plan.available.length} free now: ${plan.now.size} assigned roles · ${newStartCandidates} proposed new-start candidates · ${managerActions} manager actions required. ${plan.next.size} future assignments are members still in other OCs. Priority: urgent existing gaps → existing stages within 48 hours → supported starts → qualifying existing queue fallback → single-L8 fallback. Every free member has a work order below. Only actual allocated roles are included in messages; new starts require Scope review, spawning and a fresh scan.</div>
           <label>Prepare messages for <select id="blom-planner-message-scope"><option value="now" ${!messageFuture?'selected':''}>Assigned now (${plan.now.size} recipients)</option><option value="future" ${messageFuture?'selected':''}>Future assignments (${plan.next.size} recipients)</option></select></label>
           ${messageGroups.length?`<div class="blom-newsletter-card"><div class="blom-newsletter-head"><div><strong>Newsletter</strong><span>${assignedAllIds.size} ${messageFuture?'future':'assigned-now'} message recipient${assignedAllIds.size===1?'':'s'}</span></div><span class="blom-mini-badge ${nativeGroupExact?'blom-good':'blom-warn'}">${nativeGroupExact?'Native group matches':'Exact list needed'}</span></div>
           <div class="blom-newsletter-note">${nativeGroupExact?`All ${availableIds.size} scanned available members have assignments. Recheck Torn\u2019s current recipient list before using its Not in an Organized Crime filter.`:`The scanned available-now list (${availableIds.size}) ${nativeExtra?`contains ${nativeExtra} extra member${nativeExtra===1?'':'s'}`:'does not include future-assignment members'}. For an exact send, use the copied recipient list rather than trusting that native filter.`}</div>
@@ -5418,7 +5447,7 @@
             ${messageFuture?'<p class="blom-placement-note">These members are still in an OC. Check the expected availability time before asking them to join.</p>':''}
             ${assignmentCards(messageGroups,messageFuture)}
           </div>
-          ${workOrders.length?`<details class="blom-inline-details" data-bl-disclosure-key="assignment-spare-options" open><summary>Work order for every free member (${workOrders.length})</summary><p class="blom-placement-note">Match individual CPR and level first. Cover urgent gaps, then uncovered stages within 48 hours, then supported starts. Blocked placements require manager action; they are not completed assignments. New-crime alternatives share the same pool.</p><div class="blom-planner-scroll"><table class="blom-planner-table"><thead><tr><th>Member</th><th>Priority and next action</th></tr></thead><tbody>${workOrders.map(row=>`<tr><td class="blom-member-cell">${person(row.member)}</td><td><div class="blom-placement-title">${row.priority===5?'Action required':'Priority '+row.priority}</div><div class="blom-placement-note">${escapeHtml(row.text)}</div>${row.kind==='assigned'?suggestion(plan.now.get(String(row.member.id)),row.member):suggestion(null,row.member)+spareMemberOptions(row.member)}</td></tr>`).join('')}</tbody></table></div></details>`:''}
+          ${workOrders.length?`<details class="blom-inline-details" data-bl-disclosure-key="assignment-spare-options" open><summary>Work order for every free member (${workOrders.length})</summary><p class="blom-placement-note">Match individual CPR and level first. Cover urgent gaps, then uncovered stages within 48 hours, then supported starts, then qualifying existing queue placements for otherwise idle members. Blocked placements require manager action; they are not completed assignments. New-crime alternatives share the same pool.</p><div class="blom-planner-scroll"><table class="blom-planner-table"><thead><tr><th>Member</th><th>Priority and next action</th></tr></thead><tbody>${workOrders.map(row=>`<tr><td class="blom-member-cell">${person(row.member)}</td><td><div class="blom-placement-title">${row.priority===5?'Action required':'Priority '+row.priority}</div><div class="blom-placement-note">${escapeHtml(row.text)}</div>${row.kind==='assigned'?suggestion(plan.now.get(String(row.member.id)),row.member):suggestion(null,row.member)+spareMemberOptions(row.member)}</td></tr>`).join('')}</tbody></table></div></details>`:''}
         </div>
       </details>
 
