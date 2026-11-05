@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.16
+// @version      1.9.17
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -3028,6 +3028,45 @@
     const result={highest,minimum:Math.max(1,highest-1)};members.set(key,result);return result;
   }
 
+  function plannerLowerLevelTrial(memberId,slot) {
+    // Cross-role trials need measured paired evidence and a qualifying role one
+    // level higher. They are never observations or speculative spawn support.
+    const state=typeof plannerInputContext!=='undefined'?plannerInputContext:null;
+    if(!state?.shared || slot.crimeId==null || !Number.isInteger(Number(slot.level)) || Number(slot.level)<1 || Number(slot.level)>=8)return null;
+    if(plannerObservation(String(memberId),slot.crime,slot.role,true))return null;
+    const cache=plannerLowerLevelTrial.cache || (plannerLowerLevelTrial.cache=new WeakMap());
+    if(!cache.has(state))cache.set(state,new Map());
+    const memo=cache.get(state),key=JSON.stringify([String(memberId),slot.crime,slot.role,slot.level]);
+    if(memo.has(key))return memo.get(key);
+    const measured=value=>value?.kind==='Observed' && value.seen && !value.stale && Number.isFinite(value.cpr) && value.cpr>=0 && value.cpr<=100;
+    const peers=[...new Set((state.members || []).map(member=>String(member.id)))].filter(id=>id!==String(memberId));
+    const candidates=[];
+    for(const [crime,def] of Object.entries(plannerWeights())){
+      if(Number(def.level)!==Number(slot.level)+1)continue;
+      const roles=Object.entries(def.roles || {});
+      for(const [role,weight] of roles){
+        const observed=plannerObservation(String(memberId),crime,role,false);
+        if(!measured(observed) || observed.cpr<mainScriptTarget(crime,Number(def.level),weight,roles.length,role))continue;
+        const differences=[];let seen=observed.seen;
+        for(const id of peers){
+          const from=plannerObservation(id,crime,role,false),to=plannerObservation(id,slot.crime,slot.role,false);
+          if(!measured(from) || !measured(to) || Math.abs(from.cpr-observed.cpr)>10)continue;
+          differences.push(to.cpr-from.cpr);seen=Math.min(seen,from.seen,to.seen);
+        }
+        differences.sort((a,b)=>a-b);
+        if(differences.length<3 || differences.at(-1)-differences[0]>10)continue;
+        const adjustment=differences[Math.floor((differences.length-1)*0.25)]-2;
+        const cpr=Math.max(0,Math.min(100,observed.cpr+adjustment));
+        candidates.push({cpr,kind:'Estimated',seen,stale:false,confidence:'Low · provisional trial',trialPlacement:true,
+          source:`Provisional L${slot.level} role trial from qualifying L${def.level} ${crime} / ${role}: ${observed.cpr}%; ${differences.length} measured paired peers within 10 source CPR points, lower-quartile difference ${adjustment+2} minus 2-point margin. Different role skills may vary. Check actual destination CPR after joining, collect it and run a fresh shared scan.`,
+          estimatedFrom:{crime,role,level:Number(def.level),cpr:observed.cpr,method:'lower-level-peer-trial',peerCount:differences.length,adjustment,allowance:2}});
+      }
+    }
+    // Do not select the most optimistic source when several bridges disagree.
+    candidates.sort((a,b)=>a.cpr-b.cpr || b.estimatedFrom.peerCount-a.estimatedFrom.peerCount || a.source.localeCompare(b.source));
+    const result=candidates[0] || null;memo.set(key,result);return result;
+  }
+
   function plannerEstimatedRole(memberId,slot) {
     // Estimates are transient planning evidence, never uploaded as observations.
     // Keep known destination data authoritative, even when stale/below target.
@@ -3066,7 +3105,7 @@
     }
     // Prefer the closest level; use the lowest estimate when sources disagree.
     candidates.sort((a,b)=>Math.abs(a.estimatedFrom.level-slot.level)-Math.abs(b.estimatedFrom.level-slot.level) || a.cpr-b.cpr);
-    return candidates[0] || null;
+    return candidates[0] || (typeof plannerLowerLevelTrial==='function'?plannerLowerLevelTrial(memberId,slot):null);
   }
 
   function plannerFit(id, slot, prefs, honourSentInvitation=false) {
@@ -3710,7 +3749,7 @@
     }
     const roster=blRoster();
     const sortRows=rows=>[...(rows || [])].sort((a,b)=>JSON.stringify(canonical(a)).localeCompare(JSON.stringify(canonical(b))));
-    return plannerReviewDigest(JSON.stringify(canonical({planningStrategy:'idle-member-augmenting-matches-v27',
+    return plannerReviewDigest(JSON.stringify(canonical({planningStrategy:'lower-level-paired-role-trials-v28',
       crimes:sortRows((state.crimes || []).map(c=>({id:c.id,name:c.name,difficulty:c.difficulty,status:c.status,isExpiring:c.isExpiring,ready_at:c.ready_at,expired_at:c.expired_at,slots:c.slots}))),
       members:sortRows(state.members),profiles:sortRows(state.profiles),weights:state.weights,targetPolicy:state.targetPolicy,learning:state.learning,
       levels:plannerSelectedLevels(prefs).sort((a,b)=>a-b),includeStale:prefs.includeStale===true,
@@ -5342,7 +5381,7 @@
         <div class="blom-placement-meta">Existing OC #${escapeHtml(fit.crimeId)} · slot ${Number(fit.key.split(':')[1])+1}</div>
         <div class="blom-placement-meta"><strong>${formatCpr(fit.cpr)} CPR</strong> · target ${fit.target}% · ${fit.kind} · ${escapeHtml(fit.source || 'Local')} · confidence ${fit.confidence}</div>
         <div class="blom-placement-note">${fit.seen ? `Last observed ${new Date(fit.seen).toLocaleDateString('en-GB', {timeZone:'Europe/London'})}` : 'Observation date unknown'}${fit.stale?' · STALE':''}
-        ${fit.kind==='Estimated'?(fit.estimatedFrom?' · PROVISIONAL: destination CPR unverified; check after joining':' · Based on an unnumbered version of this role'):''}
+        ${fit.kind==='Estimated'?(fit.trialPlacement?' · PROVISIONAL ROLE TRIAL: destination CPR unverified; check and collect actual CPR after joining':fit.estimatedFrom?' · PROVISIONAL: destination CPR unverified; check after joining':' · Based on an unnumbered version of this role'):''}
         ${plannerState.source?' · Check member status and slot availability on Torn':''}
         ${fit.expiresKnown===false?' · Slot expiry unknown; available-now suggestion only':''}</div>
         ${fit.startable?`<div class="blom-placement-note">Start this unstarted OC when available. Follow-on stages depend on that first join; later staffing remains conditional.</div>`:''}
@@ -5465,7 +5504,7 @@
       return [...new Set(groups.map(group=>group.level))].sort((a,b)=>b-a).map(level=>
         `<h3>Level ${level}</h3><div class="blom-assignment-grid">` + groups.filter(group=>group.level===level).map(group=>
           `<div class="blom-assignment-card"><div class="blom-assignment-title"><span class="blom-level-badge">L${group.level}</span><span>${escapeHtml(group.crime)}</span><span class="blom-crime-id">#${escapeHtml(group.crimeId)}</span></div><div class="blom-assignment-rows">${group.rows.sort((a,b)=>String(a.fit.role).localeCompare(String(b.fit.role))).map(row=>
-            `<div class="blom-assignment-row"><span class="blom-role-label">${escapeHtml(prettyRole(row.fit.role))}</span><span class="blom-assignee">${person(row.member)}${future?`<small class="blom-placement-note">Expected free in ${escapeHtml(plannerTime(plan.active.soon.get(String(row.member.id)).readyAt))}</small>`:''}</span><span class="blom-cpr-pill">${row.fit.kind==='Estimated'?'Provisional ~':''}${formatCpr(row.fit.cpr)} CPR</span>${row.fit.estimatedFrom?`<small class="blom-placement-note">${escapeHtml(row.fit.source)}</small>`:''}${row.fit.l8Shortfall?`<small class="blom-placement-note">L8 near target: ${row.fit.l8Shortfall} point(s) below ${row.fit.target}% target · accepted within 3 points</small>`:''}${row.fit.idleL8Fallback?`<small class="blom-placement-note">Last-resort L8 · estimated queue wait ${Number.isFinite(row.fit.queueWaitHours)?row.fit.queueWaitHours.toFixed(1)+'h':'unknown'}</small>`:''}</div>`).join('')}</div></div>`).join('')+'</div>').join('');
+            `<div class="blom-assignment-row"><span class="blom-role-label">${escapeHtml(prettyRole(row.fit.role))}</span><span class="blom-assignee">${person(row.member)}${future?`<small class="blom-placement-note">Expected free in ${escapeHtml(plannerTime(plan.active.soon.get(String(row.member.id)).readyAt))}</small>`:''}</span><span class="blom-cpr-pill">${row.fit.trialPlacement?'Provisional trial ~':row.fit.kind==='Estimated'?'Provisional ~':''}${formatCpr(row.fit.cpr)} CPR</span>${row.fit.estimatedFrom?`<small class="blom-placement-note">${escapeHtml(row.fit.source)}</small>`:''}${row.fit.l8Shortfall?`<small class="blom-placement-note">L8 near target: ${row.fit.l8Shortfall} point(s) below ${row.fit.target}% target · accepted within 3 points</small>`:''}${row.fit.idleL8Fallback?`<small class="blom-placement-note">Last-resort L8 · estimated queue wait ${Number.isFinite(row.fit.queueWaitHours)?row.fit.queueWaitHours.toFixed(1)+'h':'unknown'}</small>`:''}</div>`).join('')}</div></div>`).join('')+'</div>').join('');
     }
     const availableCount=plannerState.diagnostics && plannerState.diagnostics.expectedUnassigned!==0 && plannerState.diagnostics.foundUnassigned===0?'?':plan.available.length;
     const topSpawn=needed.crews.length?needed.assessment?.levels.find(l=>l.level===needed.crews[0].level) || null:null;
