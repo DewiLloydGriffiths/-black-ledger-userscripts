@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.22
+// @version      1.9.23
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -2918,6 +2918,8 @@
       const roles=personal.outcomes.flatMap(outcome=>outcome.fits.map(fit=>'L'+fit.level+' '+outcome.crime+' — '+prettyRole(fit.role)+' ('+(fit.kind==='Estimated'?'provisional ~':'')+fit.cpr+' CPR / '+fit.target+'% target; '+fit.kind+(fit.stale?', stale':'')+')'));
       return {kind:'needs-review',text:'New-start assessment: '+roles.join('; ')+'. '+personal.reason+' These are alternatives using the same spare pool; review the combined spawn quantity, spawn one and scan the actual crime before assigning.'};
     }
+    if(plan.defs && !Object.entries(plan.defs).some(([crime,def])=>Object.keys(def.roles || {}).some(role=>plannerObservation(id,crime,role,true))))
+      return {kind:'needs-evidence',text:'No personal role scores are recorded. Collect and sync at least one measured role CPR, then scan again so paired peer comparisons have a personal starting score. An unscored trial is not permitted; no role offer has been made.'};
     return {kind:'needs-fit',text:'No eligible next-role or supported new-start pair found in this scan. Check selected levels, exact-role CPR and distinct follower availability; no destination has been invented.'};
   }
 
@@ -3055,7 +3057,9 @@
       const roles=Object.entries(def.roles || {});
       for(const [role,weight] of roles){
         const observed=plannerObservation(String(memberId),crime,role,false);
-        if(!measured(observed) || observed.cpr<mainScriptTarget(crime,Number(def.level),weight,roles.length,role))continue;
+        const sourceTarget=mainScriptTarget(crime,Number(def.level),weight,roles.length,role);
+        const sourceAllowance=Number(def.level)===8?3:0;
+        if(!measured(observed) || observed.cpr<sourceTarget-sourceAllowance)continue;
         const differences=[];let seen=observed.seen;
         for(const id of peers){
           const from=plannerObservation(id,crime,role,false),to=plannerObservation(id,slot.crime,slot.role,false);
@@ -9360,7 +9364,7 @@
       const id=String(member.id),observed=plannerObservation(id,slot.crime,slot.role,true),estimated=observed?null:plannerEstimatedRole(id,slot),match=plannerFit(id,slot,prefs);
       return {member_id:id,slot_key:slot.key,target:mainScriptTarget(slot.crime,slot.level,slot.weight,slot.roleCount,slot.role),level_floor:plannerLevelFloor(id,prefs),observed:observed?fit(observed):null,estimated:estimated?fit(estimated):null,eligible:!!match,owner:owners.get(slot.key) || null};
     }));
-    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.22'):'1.9.22',exported_at:new Date(now).toISOString(),
+    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.23'):'1.9.23',exported_at:new Date(now).toISOString(),
       snapshot:{...pick(state,['version','complete','shared','revision','scannedAt','scanStartedAt','factionId','viewerId']),
         members:(state.members || []).map(m=>({...pick(m,['id','name','is_in_oc','ocEligible']),status:pick(m.status,['state'])})),
         crimes:(state.crimes || []).map(crime=>({...pick(crime,['id','name','difficulty','status','isExpiring','ready_at','expired_at','pageScan','planningPhase','planningSecondsPerSlot','planningObservedAt']),slots:(crime.slots || []).map(slot=>({...pick(slot,['position','planningPercent','planningState']),position_info:pick(slot.position_info,['label']),user:slot.user===null?null:slot.user?pick(slot.user,['id','name']):undefined,item_requirement:pick(slot.item_requirement,['id'])}))})),
