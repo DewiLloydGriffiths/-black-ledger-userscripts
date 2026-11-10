@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.24
+// @version      1.9.25
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -2893,7 +2893,8 @@
     if(crews.length)return {kind:'new-start',text:'Proposed new-OC candidate: '+[...new Set(crews.map(crew=>crew.label))].join(', ')+'. Review Scope and spawn one, then scan its actual roles; this is conditional until the OC exists.'};
     if(assessment.releaseStart?.currentIds.includes(id)){
       const forecast=assessment.releaseStart,when=new Date(forecast.startAt).toLocaleString('en-GB',{timeZone:'Europe/London',hour12:false});
-      return {kind:forecast.scopeReady?'new-start':'needs-review',text:'Conditional new-start candidate after crew release at '+when+': reassess one '+forecast.label+' OC using the free members and qualifying finishers. Confirm completion, run Fresh shared scan and recheck Scope first. Exact roles depend on the actual random outcome; this is not an existing-role assignment.'+(!forecast.scopeReady?' Scope/policy review: '+forecast.scopeReason:'')};
+      const roles=(forecast.outcomes || []).flatMap(outcome=>outcome.schedule.filter(row=>String(row.id)===id).map(row=>outcome.crime+' / '+prettyRole(row.fit.role)+' ('+row.fit.cpr+'% CPR / '+row.fit.target+'% target)'));
+      return {kind:forecast.scopeReady?'new-start':'needs-review',text:'Conditional spawn recommendation: one '+forecast.label+' OC after crew release at '+when+'.'+(roles.length?' This member qualifies in these possible outcomes: '+roles.join('; ')+'.':'')+' Confirm completion, run Fresh shared scan and recheck Scope first. Other outcomes may need different members; spawn one and scan its actual roles before assigning. This is not an existing-role assignment.'+(!forecast.scopeReady?' Scope/policy review: '+forecast.scopeReason:'')};
     }
     const fits=(plan.active.open || []).filter(slot=>plannerFit(id,slot,prefs));
     const used=new Set([...plan.now.values(),...plan.next.values()].map(fit=>fit.key));
@@ -4160,9 +4161,17 @@
     const committed=new Map([...plan.now,...plan.next,...plan.coverageReservations]);
     const idle=plan.available.filter(member=>!committed.has(String(member.id)) && !plan.mailedHeld.has(String(member.id)) && member.ocEligible!==false && (!member.status?.state || member.status.state==='Okay'));
     const used=new Set([...committed.values()].map(fit=>fit.key));
-    // This exception extends existing running queues only. Empty openings retain
-    // their initial pair cap; L8 retains its separate single-OC fallback.
-    const slots=plan.active.open.filter(slot=>slot.level<8 && !slot.opening && !slot.openingUnsupported && !used.has(slot.key) && Number.isFinite(slot.stallAt) && slot.expiresAt>prefs.asOf);
+    // Otherwise-idle current members may also join an existing empty OC once
+    // its distinct starter/follower pair is committed. Offers remain conditional
+    // until members join; do not treat the empty OC as already running.
+    const supportedOpenings=new Set();
+    const openingCounts=new Map();
+    for(const fit of committed.values())if(fit.opening){
+      const crime=String(fit.crimeId);
+      openingCounts.set(crime,(openingCounts.get(crime)||0)+1);
+      if(openingCounts.get(crime)>=Math.min(2,fit.roleCount))supportedOpenings.add(crime);
+    }
+    const slots=plan.active.open.filter(slot=>slot.level<8 && (!slot.opening || slot.startable && supportedOpenings.has(String(slot.crimeId))) && !slot.openingUnsupported && !used.has(slot.key) && (slot.startable || Number.isFinite(slot.stallAt)) && slot.expiresAt>prefs.asOf);
     if(!idle.length || !slots.length)return result;
     const future=plan.upcoming.filter(member=>!committed.has(String(member.id)) && !plan.mailedHeld.has(String(member.id)));
     const memberReadyHours=Object.fromEntries(future.map(member=>[String(member.id),Math.max(0,(plan.active.soon.get(String(member.id)).readyAt-prefs.asOf)/3600000)]));
@@ -4172,7 +4181,7 @@
     for(const crew of needed.crews)if(plannerSpawnQuantityDecision({...needed,crews:[crew]},state,plan,prefs).allowed)
       for(const id of crew.ids)result.spawnProtected.add(String(id));
     const candidates=idle.filter(member=>!result.spawnProtected.has(String(member.id)));
-    const matched=plannerAssignStaged(candidates,slots,{...prefs,maxOpeningStages:2},new Map(),committed);
+    const matched=plannerAssignStaged(candidates,slots,{...prefs,maxOpeningStages:0},new Map(),committed);
     for(const [id,fit] of matched)result.placements.set(id,{...fit,idleExistingFallback:true,assignmentPriority:4});
     return result;
   }
@@ -9438,7 +9447,7 @@
       const id=String(member.id),observed=plannerObservation(id,slot.crime,slot.role,true),estimated=observed?null:plannerEstimatedRole(id,slot),match=plannerFit(id,slot,prefs);
       return {member_id:id,slot_key:slot.key,target:mainScriptTarget(slot.crime,slot.level,slot.weight,slot.roleCount,slot.role),level_floor:plannerLevelFloor(id,prefs),observed:observed?fit(observed):null,estimated:estimated?fit(estimated):null,eligible:!!match,owner:owners.get(slot.key) || null};
     }));
-    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.24'):'1.9.24',exported_at:new Date(now).toISOString(),
+    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.25'):'1.9.25',exported_at:new Date(now).toISOString(),
       snapshot:{...pick(state,['version','complete','shared','revision','scannedAt','scanStartedAt','factionId','viewerId']),
         members:(state.members || []).map(m=>({...pick(m,['id','name','is_in_oc','ocEligible']),status:pick(m.status,['state'])})),
         crimes:(state.crimes || []).map(crime=>({...pick(crime,['id','name','difficulty','status','isExpiring','ready_at','expired_at','pageScan','planningPhase','planningSecondsPerSlot','planningObservedAt']),slots:(crime.slots || []).map(slot=>({...pick(slot,['position','planningPercent','planningState']),position_info:pick(slot.position_info,['label']),user:slot.user===null?null:slot.user?pick(slot.user,['id','name']):undefined,item_requirement:pick(slot.item_requirement,['id'])}))})),
@@ -12108,6 +12117,7 @@
   setTimeout(safeInit, 0);
 
 })();
+
 
 
 
