@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.23
+// @version      1.9.24
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -3080,10 +3080,84 @@
     const result=candidates[0] || null;memo.set(key,result);return result;
   }
 
+  function plannerLearnedPair(points,value) {
+    // One point per distinct measured member. Validate each point against a fit
+    // trained without that member; never score a fit against its training rows.
+    if(points.length<8 || !Number.isFinite(value))return null;
+    const fit=rows=>{
+      const n=rows.length,mx=rows.reduce((s,p)=>s+p.x,0)/n,my=rows.reduce((s,p)=>s+p.y,0)/n;
+      let xx=0,xy=0,yy=0;
+      for(const p of rows){xx+=(p.x-mx)**2;xy+=(p.x-mx)*(p.y-my);yy+=(p.y-my)**2;}
+      if(xx<1e-8 || yy<1e-8)return null;
+      return {slope:xy/xx,intercept:my-xy/xx*mx,correlation:xy/Math.sqrt(xx*yy),mean:my};
+    };
+    const model=fit(points),xs=points.map(p=>p.x),min=Math.min(...xs),max=Math.max(...xs);
+    if(!model || model.correlation<0.8 || max-min<8 || value<min || value>max)return null;
+    const errors=[],baseline=[];
+    for(let i=0;i<points.length;i++){
+      const training=points.filter((_,j)=>i!==j),held=points[i],test=fit(training);
+      if(!test)return null;
+      errors.push(Math.abs(held.y-Math.max(0,Math.min(100,test.intercept+test.slope*held.x))));
+      baseline.push(Math.abs(held.y-test.mean));
+    }
+    const mae=errors.reduce((a,b)=>a+b,0)/errors.length,baselineMae=baseline.reduce((a,b)=>a+b,0)/baseline.length;
+    if(mae>5 || baselineMae<1 || mae>baselineMae*0.75)return null;
+    errors.sort((a,b)=>a-b);
+    const uncertainty=Math.max(2,errors[Math.ceil(errors.length*0.9)-1]);
+    if(uncertainty>8)return null;
+    return {...model,mae,baselineMae,uncertainty,peerCount:points.length,
+      prediction:Math.max(0,Math.min(100,model.intercept+model.slope*value))};
+  }
+
+  function plannerLearnedRole(memberId,slot) {
+    const state=typeof plannerInputContext!=='undefined'?plannerInputContext:null;
+    if(!state?.shared || slot.crimeId==null || !Array.isArray(state.profiles) || plannerObservation(String(memberId),slot.crime,slot.role,true))return null;
+    // Cache belongs to an immutable shared scan. A new scan rebuilds all models
+    // from latest measured profiles, including newly collected destination CPR.
+    const cache=plannerLearnedRole.cache || (plannerLearnedRole.cache=new WeakMap());
+    if(!cache.has(state))cache.set(state,new Map());
+    const memo=cache.get(state),key=JSON.stringify([String(memberId),slot.crime,slot.role,slot.level]);
+    if(memo.has(key))return memo.get(key);
+    const measured=p=>p?.kind==='Observed' && Number.isFinite(p.seen) && p.seen>0 && !p.stale && Number.isFinite(p.cpr) && p.cpr>=0 && p.cpr<=100;
+    const peers=[...new Set((state.members || []).map(m=>String(m.id)))].filter(id=>id!==String(memberId));
+    const destinations=peers.map(id=>({id,to:plannerObservation(id,slot.crime,slot.role,false)})).filter(p=>measured(p.to));
+    const candidates=[];
+    if(destinations.length>=8)for(const [crime,def] of Object.entries(plannerWeights())){
+      if(!Number.isInteger(Number(def.level)) || Number(def.level)<1 || Number(def.level)>10)continue;
+      for(const role of Object.keys(def.roles || {})){
+        if(normalize(crime)===normalize(slot.crime) && normalize(role)===normalize(slot.role))continue;
+        const observed=plannerObservation(String(memberId),crime,role,false);
+        if(!measured(observed))continue;
+        const points=[];let seen=observed.seen;
+        for(const {id,to} of destinations){
+          const from=plannerObservation(id,crime,role,false);
+          if(!measured(from) || Math.abs(from.seen-to.seen)>7*86400000)continue;
+          points.push({x:from.cpr,y:to.cpr});seen=Math.min(seen,from.seen,to.seen);
+        }
+        const model=plannerLearnedPair(points,observed.cpr);
+        if(model)candidates.push({...model,crime,role,level:Number(def.level),cpr:observed.cpr,seen});
+      }
+    }
+    // Choose by held-out error, never by the highest predicted CPR. Correlated
+    // anchors do not shrink the uncertainty as though they were new members.
+    candidates.sort((a,b)=>a.mae-b.mae || b.peerCount-a.peerCount || a.crime.localeCompare(b.crime) || a.role.localeCompare(b.role));
+    const selected=candidates.slice(0,5);let result=null;
+    if(selected.length && Math.max(...selected.map(p=>p.prediction))-Math.min(...selected.map(p=>p.prediction))<=10){
+      const best=selected[0],low=Math.max(0,Math.min(...selected.map(p=>p.prediction-p.uncertainty))),high=Math.min(100,Math.max(...selected.map(p=>p.prediction+p.uncertainty)));
+      const cpr=Math.floor(low*10)/10,seen=Math.min(...selected.map(p=>p.seen));
+      result={cpr,kind:'Estimated',seen,stale:false,confidence:'Provisional · validated peer model',
+        source:`Learned provisional CPR ${cpr}% (conservative end of ${low.toFixed(1)}–${high.toFixed(1)} empirical range); ${best.peerCount} measured paired peers, ${best.mae.toFixed(1)}-point leave-one-member-out error; ${selected.length} measured source role(s). Real destination CPR replaces this estimate on the next fresh shared scan.`,
+        estimatedFrom:{crime:best.crime,role:best.role,level:best.level,cpr:best.cpr,method:'validated-peer-regression',peerCount:best.peerCount,validationMae:best.mae,baselineMae:best.baselineMae,correlation:best.correlation,rangeLow:low,rangeHigh:high,anchorCount:selected.length,planningMargin:best.uncertainty}};
+    }
+    memo.set(key,result);return result;
+  }
+
   function plannerEstimatedRole(memberId,slot) {
     // Estimates are transient planning evidence, never uploaded as observations.
     // Keep known destination data authoritative, even when stale/below target.
     if(plannerObservation(String(memberId),slot.crime,slot.role,true))return null;
+    const learned=typeof plannerLearnedRole==='function'?plannerLearnedRole(memberId,slot):null;
+    if(learned)return learned;
     const base=role=>normalize(String(role).replace(/[\s#\d]+$/,''));
     const candidates=[];
     for(const [crime,def] of Object.entries(plannerWeights())){
@@ -3770,7 +3844,7 @@
     }
     const roster=blRoster();
     const sortRows=rows=>[...(rows || [])].sort((a,b)=>JSON.stringify(canonical(a)).localeCompare(JSON.stringify(canonical(b))));
-    return plannerReviewDigest(JSON.stringify(canonical({planningStrategy:'l8-placement-first-v30',
+    return plannerReviewDigest(JSON.stringify(canonical({planningStrategy:'validated-peer-learning-v31',
       crimes:sortRows((state.crimes || []).map(c=>({id:c.id,name:c.name,difficulty:c.difficulty,status:c.status,isExpiring:c.isExpiring,ready_at:c.ready_at,expired_at:c.expired_at,slots:c.slots}))),
       members:sortRows(state.members),profiles:sortRows(state.profiles),weights:state.weights,targetPolicy:state.targetPolicy,learning:state.learning,
       levels:plannerSelectedLevels(prefs).sort((a,b)=>a-b),includeStale:prefs.includeStale===true,
@@ -9357,14 +9431,14 @@
     // API keys, session data, message bodies or arbitrary snapshot properties.
     const pick=(value,keys)=>Object.fromEntries(keys.filter(key=>value?.[key]===null || ['string','number','boolean'].includes(typeof value?.[key])).map(key=>[key,typeof value[key]==='number' && !Number.isFinite(value[key])?String(value[key]):value[key]]));
     const slotKeys=['key','crimeId','crime','role','level','weight','roleCount','opening','startable','openingUnsupported','openingHoldReason','expiresAt','expiresKnown','stallAt','coverageSource','emptySlots','filledSlots','itemId'];
-    const fit=value=>({...pick(value,[...slotKeys,'cpr','target','kind','source','seen','stale','confidence','margin','joinByAt','planningStartAt','queueWaitHours','conditionalPlanning','capabilityLevel','assignmentPriority','trialPlacement','idleExistingFallback','idleL8Fallback','l8PlacementPriority','rebalancedExisting','l8Shortfall']),...(value?.estimatedFrom?{estimatedFrom:pick(value.estimatedFrom,['crime','role','level','cpr','method','peerCount','adjustment','allowance'])}:{})});
+    const fit=value=>({...pick(value,[...slotKeys,'cpr','target','kind','source','seen','stale','confidence','margin','joinByAt','planningStartAt','queueWaitHours','conditionalPlanning','capabilityLevel','assignmentPriority','trialPlacement','idleExistingFallback','idleL8Fallback','l8PlacementPriority','rebalancedExisting','l8Shortfall']),...(value?.estimatedFrom?{estimatedFrom:pick(value.estimatedFrom,['crime','role','level','cpr','method','peerCount','adjustment','allowance','planningMargin','validationMae','baselineMae','correlation','rangeLow','rangeHigh','anchorCount'])}:{})});
     const assignments=map=>[...(map || new Map())].map(([id,value])=>({member_id:String(id),fit:fit(value)}));
     const owners=new Map([...plan.now,...plan.next].map(([id,value])=>[value.key,{member_id:String(id),future:plan.next.has(id),sent:plan.mailedHeld.has(String(id))}]));
     const eligibility=plan.available.flatMap(member=>(plan.active.open || []).map(slot=>{
       const id=String(member.id),observed=plannerObservation(id,slot.crime,slot.role,true),estimated=observed?null:plannerEstimatedRole(id,slot),match=plannerFit(id,slot,prefs);
       return {member_id:id,slot_key:slot.key,target:mainScriptTarget(slot.crime,slot.level,slot.weight,slot.roleCount,slot.role),level_floor:plannerLevelFloor(id,prefs),observed:observed?fit(observed):null,estimated:estimated?fit(estimated):null,eligible:!!match,owner:owners.get(slot.key) || null};
     }));
-    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.23'):'1.9.23',exported_at:new Date(now).toISOString(),
+    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.24'):'1.9.24',exported_at:new Date(now).toISOString(),
       snapshot:{...pick(state,['version','complete','shared','revision','scannedAt','scanStartedAt','factionId','viewerId']),
         members:(state.members || []).map(m=>({...pick(m,['id','name','is_in_oc','ocEligible']),status:pick(m.status,['state'])})),
         crimes:(state.crimes || []).map(crime=>({...pick(crime,['id','name','difficulty','status','isExpiring','ready_at','expired_at','pageScan','planningPhase','planningSecondsPerSlot','planningObservedAt']),slots:(crime.slots || []).map(slot=>({...pick(slot,['position','planningPercent','planningState']),position_info:pick(slot.position_info,['label']),user:slot.user===null?null:slot.user?pick(slot.user,['id','name']):undefined,item_requirement:pick(slot.item_requirement,['id'])}))})),
@@ -12034,5 +12108,6 @@
   setTimeout(safeInit, 0);
 
 })();
+
 
 
