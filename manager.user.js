@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.25
+// @version      1.9.26
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -5220,6 +5220,10 @@
     if(!state.shared || !/^[1-9]\d*$/.test(String(state.viewerId)) || !/^[1-9]\d*$/.test(String(state.factionId)))return needed;
     const key='black-ledger-spawn-demand-v1:'+state.viewerId+':'+state.factionId;
     const signature=plannerReviewDigest(JSON.stringify({
+      // A quota belongs to one scan. Fresh scans already reassess existing OCs
+      // and remove assigned/committed people from the spare pool. Reusing an
+      // older quota would subtract those spawns twice and hide new demand.
+      scannedAt:state.scannedAt,
       levels:plannerSelectedLevels(prefs).sort((a,b)=>a-b),
       members:state.members.map(m=>[String(m.id),m.is_in_oc,m.ocEligible,m.status?.state || 'Okay']).sort((a,b)=>a[0].localeCompare(b[0]))
     }));
@@ -9447,7 +9451,7 @@
       const id=String(member.id),observed=plannerObservation(id,slot.crime,slot.role,true),estimated=observed?null:plannerEstimatedRole(id,slot),match=plannerFit(id,slot,prefs);
       return {member_id:id,slot_key:slot.key,target:mainScriptTarget(slot.crime,slot.level,slot.weight,slot.roleCount,slot.role),level_floor:plannerLevelFloor(id,prefs),observed:observed?fit(observed):null,estimated:estimated?fit(estimated):null,eligible:!!match,owner:owners.get(slot.key) || null};
     }));
-    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.25'):'1.9.25',exported_at:new Date(now).toISOString(),
+    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.26'):'1.9.26',exported_at:new Date(now).toISOString(),
       snapshot:{...pick(state,['version','complete','shared','revision','scannedAt','scanStartedAt','factionId','viewerId']),
         members:(state.members || []).map(m=>({...pick(m,['id','name','is_in_oc','ocEligible']),status:pick(m.status,['state'])})),
         crimes:(state.crimes || []).map(crime=>({...pick(crime,['id','name','difficulty','status','isExpiring','ready_at','expired_at','pageScan','planningPhase','planningSecondsPerSlot','planningObservedAt']),slots:(crime.slots || []).map(slot=>({...pick(slot,['position','planningPercent','planningState']),position_info:pick(slot.position_info,['label']),user:slot.user===null?null:slot.user?pick(slot.user,['id','name']):undefined,item_requirement:pick(slot.item_requirement,['id'])}))})),
