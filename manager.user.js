@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.27
+// @version      1.9.28
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -7937,16 +7937,9 @@
       const groups=new Map();
       for(const row of rows){if(!groups.has(row.crime))groups.set(row.crime,[]);groups.get(row.crime).push(row);}
       const estimated=rows.filter(row=>row.kind==='Estimated').length,recorded=rows.length-estimated;
-      const evidence=row=>{
-        const detail=row.estimatedFrom,low=detail.rangeLow,high=detail.rangeHigh;
-        const range=Number.isFinite(low) && Number.isFinite(high)?`Empirical range ${low.toFixed(1)}–${high.toFixed(1)}%. `:'';
-        const error=Number.isFinite(detail.validationMae)?`Average validation error ${detail.validationMae.toFixed(1)} points. `:'';
-        const date=Number.isFinite(row.seen)?formatDate(new Date(row.seen).toISOString()):'undated';
-        return `<tr class="blom-member-estimate-evidence"><td colspan="3"><details><summary>Estimate evidence</summary><div>${escapeHtml(range+error)}${escapeHtml(detail.peerCount)} distinct paired peers. Source: ${escapeHtml(detail.crime)} / ${escapeHtml(prettyRole(detail.role))}, ${escapeHtml(formatCpr(detail.cpr))}. Oldest supporting reading: ${escapeHtml(date)}. ${detail.method==='validated-peer-regression'?'Validated model':'Small-sample provisional comparison'}. Real readings take priority.</div></details></td></tr>`;
-      };
       body.querySelector('#blom-member-results').innerHTML=`<div class="blom-summary"><div>${memberLink(id)}</div><div>${groups.size} OCs · ${recorded} recorded role CPRs · ${estimated} estimated</div></div>
         <p class="blom-member-evidence-note">Estimates are provisional monitoring figures. Script check-ins do not prove complete score coverage. ${unknown?`${unknown} role(s) remain without enough evidence. `:''}${!context.profiles.some(p=>String(p.user_id)===String(id))?'At least one dated personal measured score is needed for peer estimates. ':''}Real captured scores replace estimates after data refresh.</p>
-        ${rows.length?`<div class="blom-member-list">${[...groups].map(([crime,roles])=>`<section class="blom-member-crime"><h3 class="blom-member-crime-title">${roles[0].level?`L${roles[0].level}`:'—'} · ${escapeHtml(crime)}</h3><table class="blom-member-role-table" aria-label="${escapeAttr(crime)} role CPRs"><thead><tr><th scope="col">Role</th><th scope="col">CPR</th><th scope="col">Evidence</th></tr></thead><tbody>${roles.map(row=>`<tr class="${row.kind==='Estimated'?'blom-member-estimated':'blom-member-recorded'}"><th scope="row">${escapeHtml(prettyRole(row.role))}</th><td class="blom-member-score">${row.kind==='Estimated'?'~':''}${formatCpr(row.cpr)}</td><td class="blom-member-observed">${row.kind==='Estimated'?'<span class="blom-member-estimate-label">Estimated</span>':row.seen?`<span class="blom-member-row-date"><span class="blom-member-date-label">Observed </span>${formatDate(row.seen)}</span>`:'Recorded · undated'}</td></tr>${row.kind==='Estimated'?evidence(row):''}`).join('')}</tbody></table></section>`).join('')}</div>`:'<div class="blom-muted">No CPR records or supported estimates for this member.</div>'}`;
+        ${rows.length?`<div class="blom-member-list">${[...groups].map(([crime,roles])=>`<section class="blom-member-crime"><h3 class="blom-member-crime-title">${roles[0].level?`L${roles[0].level}`:'—'} · ${escapeHtml(crime)}</h3><table class="blom-member-role-table" aria-label="${escapeAttr(crime)} role CPRs"><thead><tr><th scope="col">Role</th><th scope="col">CPR</th><th scope="col">Evidence</th></tr></thead><tbody>${roles.map(row=>`<tr class="${row.kind==='Estimated'?'blom-member-estimated':'blom-member-recorded'}"><th scope="row">${escapeHtml(prettyRole(row.role))}</th><td class="blom-member-score">${row.kind==='Estimated'?'~':''}${formatCpr(row.cpr)}</td><td class="blom-member-observed">${row.kind==='Estimated'?'<span class="blom-member-estimate-label">Estimated</span>':row.seen?`<span class="blom-member-row-date"><span class="blom-member-date-label">Observed </span>${formatDate(row.seen)}</span>`:'Recorded · undated'}</td></tr>`).join('')}</tbody></table></section>`).join('')}</div>`:'<div class="blom-muted">No CPR records or supported estimates for this member.</div>'}`;
     };
     select.addEventListener('change',render);
     if(select.value)render();
@@ -9353,7 +9346,7 @@
       const id=String(member.id),observed=plannerObservation(id,slot.crime,slot.role,true),estimated=observed?null:plannerEstimatedRole(id,slot),match=plannerFit(id,slot,prefs);
       return {member_id:id,slot_key:slot.key,target:mainScriptTarget(slot.crime,slot.level,slot.weight,slot.roleCount,slot.role),level_floor:plannerLevelFloor(id,prefs),observed:observed?fit(observed):null,estimated:estimated?fit(estimated):null,eligible:!!match,owner:owners.get(slot.key) || null};
     }));
-    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.27'):'1.9.27',exported_at:new Date(now).toISOString(),
+    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.28'):'1.9.28',exported_at:new Date(now).toISOString(),
       snapshot:{...pick(state,['version','complete','shared','revision','scannedAt','scanStartedAt','factionId','viewerId']),
         members:(state.members || []).map(m=>({...pick(m,['id','name','is_in_oc','ocEligible']),status:pick(m.status,['state'])})),
         crimes:(state.crimes || []).map(crime=>({...pick(crime,['id','name','difficulty','status','isExpiring','ready_at','expired_at','pageScan','planningPhase','planningSecondsPerSlot','planningObservedAt']),slots:(crime.slots || []).map(slot=>({...pick(slot,['position','planningPercent','planningState']),position_info:pick(slot.position_info,['label']),user:slot.user===null?null:slot.user?pick(slot.user,['id','name']):undefined,item_requirement:pick(slot.item_requirement,['id'])}))})),
@@ -11592,19 +11585,6 @@
         display:inline-block !important; background:#3c321c !important;
         border:1px solid #8c7443 !important; border-radius:4px !important;
         padding:2px 3px !important; font:700 11px/1.4 sans-serif !important;
-      }
-      #${PANEL_ID} .blom-member-estimate-evidence details { margin:0 !important; background:#1c2226 !important; }
-      #${PANEL_ID} .blom-member-estimate-evidence summary {
-        box-sizing:border-box !important; min-height:44px !important; padding:10px !important;
-        border:1px solid #526b7b !important; border-radius:5px !important;
-        background:#263d4a !important; color:#e8eef2 !important; -webkit-text-fill-color:#e8eef2 !important;
-        cursor:pointer !important; font:600 13px/1.5 sans-serif !important; overflow-wrap:anywhere !important;
-      }
-      #${PANEL_ID} .blom-member-estimate-evidence summary:hover { background:#345668 !important; }
-      #${PANEL_ID} .blom-member-estimate-evidence summary:focus-visible { outline:2px solid #9be1ff !important; outline-offset:2px !important; }
-      #${PANEL_ID} .blom-member-estimate-evidence details > div {
-        padding:10px !important; color:#cbd7df !important; -webkit-text-fill-color:#cbd7df !important;
-        background:#1c2226 !important; font:400 13px/1.5 sans-serif !important; overflow-wrap:anywhere !important;
       }
       #${PANEL_ID} .blom-member-role-table tbody tr:last-child > * { border-bottom:0 !important; }
       @media(max-width:480px) {
