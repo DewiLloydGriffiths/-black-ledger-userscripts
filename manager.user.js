@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.26
+// @version      1.9.27
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -1876,7 +1876,7 @@
       for(const row of Object.values(index)) if(row.user_name && isValidName(row.user_name))meta.names[String(row.user_id)]=row.user_name;
       saveMeta();return true;
     }catch(error){sharedError=String(error.message || 'Shared CPR connection failed. Previous cache retained.');return false;}
-    finally{sharedBusy=false;renderPlannerIfOpen();}
+    finally{sharedBusy=false;renderPlannerIfOpen();if(typeof refreshMembersIfOpen==='function')refreshMembersIfOpen();}
   }
 
   function configureSharedAccess() {
@@ -3040,11 +3040,11 @@
     const result={highest,minimum:Math.max(1,highest-1)};members.set(key,result);return result;
   }
 
-  function plannerLowerLevelTrial(memberId,slot) {
+  function plannerLowerLevelTrial(memberId,slot,displayOnly=false) {
     // Cross-role trials need measured paired evidence and a qualifying role one
     // level higher. They are never observations or speculative spawn support.
     const state=typeof plannerInputContext!=='undefined'?plannerInputContext:null;
-    if(!state?.shared || slot.crimeId==null || !Number.isInteger(Number(slot.level)) || Number(slot.level)<1 || Number(slot.level)>=8)return null;
+    if(!state?.shared || !displayOnly && slot.crimeId==null || !Number.isInteger(Number(slot.level)) || Number(slot.level)<1 || Number(slot.level)>=8)return null;
     if(plannerObservation(String(memberId),slot.crime,slot.role,true))return null;
     const cache=plannerLowerLevelTrial.cache || (plannerLowerLevelTrial.cache=new WeakMap());
     if(!cache.has(state))cache.set(state,new Map());
@@ -3110,9 +3110,9 @@
       prediction:Math.max(0,Math.min(100,model.intercept+model.slope*value))};
   }
 
-  function plannerLearnedRole(memberId,slot) {
+  function plannerLearnedRole(memberId,slot,displayOnly=false) {
     const state=typeof plannerInputContext!=='undefined'?plannerInputContext:null;
-    if(!state?.shared || slot.crimeId==null || !Array.isArray(state.profiles) || plannerObservation(String(memberId),slot.crime,slot.role,true))return null;
+    if(!state?.shared || !displayOnly && slot.crimeId==null || !Array.isArray(state.profiles) || plannerObservation(String(memberId),slot.crime,slot.role,true))return null;
     // Cache belongs to an immutable shared scan. A new scan rebuilds all models
     // from latest measured profiles, including newly collected destination CPR.
     const cache=plannerLearnedRole.cache || (plannerLearnedRole.cache=new WeakMap());
@@ -3153,11 +3153,11 @@
     memo.set(key,result);return result;
   }
 
-  function plannerEstimatedRole(memberId,slot) {
+  function plannerEstimatedRole(memberId,slot,displayOnly=false) {
     // Estimates are transient planning evidence, never uploaded as observations.
     // Keep known destination data authoritative, even when stale/below target.
     if(plannerObservation(String(memberId),slot.crime,slot.role,true))return null;
-    const learned=typeof plannerLearnedRole==='function'?plannerLearnedRole(memberId,slot):null;
+    const learned=typeof plannerLearnedRole==='function'?plannerLearnedRole(memberId,slot,displayOnly):null;
     if(learned)return learned;
     const base=role=>normalize(String(role).replace(/[\s#\d]+$/,''));
     const candidates=[];
@@ -3188,6 +3188,7 @@
         // Two closely agreeing peers can supply a provisional bridge. More
         // distant levels require a measured bridge, never a multiplied heuristic.
         const calibrated=differences.length>=2 && differences.at(-1)-differences[0]<=(differences.length===2?3:10);
+        if(displayOnly && !calibrated)continue;
         if(!calibrated && Math.abs(delta)>1)continue;
         const margin=calibrated && differences.length===2?3:2;
         const adjustment=calibrated?differences[Math.floor((differences.length-1)*0.25)]-margin:-allowance;
@@ -3199,7 +3200,7 @@
     // Measured peer patterns precede fixed allowances. Prefer the closest
     // calibrated source, then the lower estimate when sources disagree.
     candidates.sort((a,b)=>Number(b.estimatedFrom.method==='paired-peers')-Number(a.estimatedFrom.method==='paired-peers') || Math.abs(a.estimatedFrom.level-slot.level)-Math.abs(b.estimatedFrom.level-slot.level) || a.cpr-b.cpr);
-    return candidates[0] || (typeof plannerLowerLevelTrial==='function'?plannerLowerLevelTrial(memberId,slot):null);
+    return candidates[0] || (typeof plannerLowerLevelTrial==='function'?plannerLowerLevelTrial(memberId,slot,displayOnly):null);
   }
 
   function plannerFit(id, slot, prefs, honourSentInvitation=false) {
@@ -7871,183 +7872,84 @@
    * ============================================================
    */
 
-  function renderMembers(body) {
-
-    const members =
-      getMembers();
-
-    const options =
-      Object.keys(
-        members
-      )
-
-        .sort(
-          (a, b) =>
-            memberLabel(a)
-              .localeCompare(
-                memberLabel(b)
-              )
-        )
-
-        .map(
-          id => `
-
-            <option
-              value="${escapeAttr(id)}"
-            >
-
-              ${escapeHtml(
-                memberLabel(id)
-              )}
-
-            </option>
-          `
-        )
-
-        .join("");
-
-    body.innerHTML = `
-
-      <div class="blom-toolbar">
-
-        <label>
-
-          Member
-
-          <select
-            id="blom-member-select"
-          >
-
-            ${options}
-
-          </select>
-
-        </label>
-
-      </div>
-
-      <div
-        id="blom-member-results"
-      >
-      </div>
-    `;
-
-    const select =
-      body.querySelector(
-        "#blom-member-select"
-      );
-
-    const render =
-      () => {
-
-        const id =
-          select.value;
-
-        const crimes =
-          members[id] ||
-          {};
-
-        const rows =
-          [];
-
-        for (
-          const [
-            crime,
-            roles
-          ]
-          of Object.entries(
-            crimes
-          )
-        ) {
-
-          for (
-            const [
-              role,
-              cpr
-            ]
-            of Object.entries(
-              roles ||
-              {}
-            )
-          ) {
-
-            const observation = freshestCpr(id, crime, role, cpr);
-            const observedTime = Number(observation.timestamp_ms) || Date.parse(observation.observed_at);
-            const seen = Number.isFinite(observedTime) && observedTime > 0 && observedTime <= Date.now()
-              ? new Date(observedTime).toISOString() : null;
-            rows.push({
-
-              crime,
-              role,
-
-              cpr:
-                Number(
-                  observation.cpr
-                ),
-
-              level:
-                getCrimeLevel(
-                  crime
-                ),
-
-              seen
-            });
-          }
-        }
-
-        rows.sort(
-          (a, b) =>
-            (
-              b.level ||
-              0
-            ) -
-              (
-                a.level ||
-                0
-              ) ||
-
-            b.cpr -
-              a.cpr
-        );
-
-        // Rows are already ordered by level and CPR: the first row in each
-        // group gives its best score, keeping strong OCs near the top.
-        const groups = new Map();
-        for (const row of rows) {
-          if (!groups.has(row.crime)) groups.set(row.crime, []);
-          groups.get(row.crime).push(row);
-        }
-        body.querySelector("#blom-member-results").innerHTML = rows.length ? `
-          <div class="blom-summary">
-            <div>${memberLink(id)}</div>
-            <div>${groups.size} OCs · ${rows.length} recorded role CPRs</div>
-          </div>
-          <div class="blom-member-list">
-            ${[...groups].map(([crime, roles]) => `
-              <section class="blom-member-crime">
-                <h3 class="blom-member-crime-title">${roles[0].level ? `L${roles[0].level}` : '—'} · ${escapeHtml(crime)}</h3>
-                <table class="blom-member-role-table" aria-label="${escapeAttr(crime)} role CPRs">
-                  <thead><tr><th scope="col">Role</th><th scope="col">CPR</th><th scope="col">Observed</th></tr></thead>
-                  <tbody>${roles.map(row => `<tr>
-                    <th scope="row">${escapeHtml(prettyRole(row.role))}</th>
-                    <td class="blom-member-score">${formatCpr(row.cpr)}</td>
-                    <td class="blom-member-observed">${row.seen ? `<span class="blom-member-row-date"><span class="blom-member-date-label">Observed </span>${formatDate(row.seen)}</span>` : '—'}</td>
-                  </tr>`).join('')}</tbody>
-                </table>
-              </section>`).join('')}
-          </div>` : '<div class="blom-muted">No CPR records for this member.</div>';
-      };
-
-    select.addEventListener(
-      "change",
-      render
-    );
-
-    if (
-      select.value
-    ) {
-      render();
+  function memberScoreContext(members,now=Date.now()) {
+    // This view uses the newest merged local/server readings, not an older
+    // planner snapshot. Script check-ins do not establish score provenance.
+    const profiles=[],recorded=new Map();
+    for(const [id,crimes] of Object.entries(members)){
+      const rows=[];recorded.set(id,rows);
+      for(const [crime,roles] of Object.entries(crimes || {}))for(const [role,raw] of Object.entries(roles || {})){
+        if(raw===null || raw==='' || typeof raw==='boolean')continue;
+        const observation=freshestCpr(id,crime,role,raw),cpr=Number(observation.cpr);
+        if(!Number.isFinite(cpr) || cpr<0 || cpr>100)continue;
+        const time=Number(observation.timestamp_ms) || Date.parse(observation.observed_at);
+        const seen=Number.isFinite(time) && time>0 && time<=now?new Date(time).toISOString():null;
+        rows.push({crime,role,cpr,level:getCrimeLevel(crime),seen,kind:'Observed'});
+        // Legacy bests retain their display but never become training evidence.
+        if(seen && observation.source!=='Local recorded high')profiles.push({user_id:id,crime,role,latest_cpr:cpr,last_observed_at:seen});
+      }
     }
+    const weights=typeof plannerWeights==='function'?plannerWeights():{};
+    const targetPolicy=typeof mainTargetPolicy==='function'?mainTargetPolicy():{};
+    return {shared:true,scannedAt:now,members:Object.keys(members).map(id=>({id})),profiles,weights,targetPolicy,recorded};
+  }
+
+  function memberScoreRows(id,context) {
+    const rows=[...(context.recorded.get(String(id)) || [])];
+    if(typeof plannerEstimatedRole!=='function')return {rows,unknown:0};
+    const key=(crime,role)=>JSON.stringify([normalize(crime),normalize(role)]);
+    const known=new Set(rows.map(row=>key(row.crime,row.role)));
+    const previous=plannerInputContext;plannerInputContext=context;
+    let unknown=0;
+    try{
+      for(const [crime,def] of Object.entries(context.weights))for(const role of Object.keys(def.roles || {})){
+        if(known.has(key(crime,role)))continue;
+        const estimate=plannerEstimatedRole(String(id),{crime,role,level:Number(def.level)},true);
+        // Fixed allowances are not learned figures. Only measured peer-backed
+        // comparisons are shown in the monitoring view; no imaginary OC IDs.
+        if(!estimate || !['validated-peer-regression','paired-peers','lower-level-peer-trial'].includes(estimate.estimatedFrom?.method)){unknown++;continue;}
+        rows.push({crime,role,level:Number(def.level),...estimate});
+      }
+    }finally{plannerInputContext=previous;}
+    return {rows,unknown};
+  }
+
+  function refreshMembersIfOpen() {
+    if(document.visibilityState!=='visible' || !document.hasFocus() || !document.querySelector(`#${PANEL_ID} [data-tab="members"].active`))return;
+    const body=document.querySelector(`#${PANEL_ID} .blom-body`);if(!body)return;
+    const top=body.scrollTop,id=body.querySelector('#blom-member-select')?.value;
+    renderMembers(body,id);body.scrollTop=top;
+  }
+
+  function renderMembers(body,selectedId) {
+    const members={...getMembers()};
+    // Include verified roster members without readings so the evidence gap is
+    // visible, instead of silently dropping them from the member picker.
+    const roster=typeof blRoster==='function'?blRoster():null;
+    for(const id of roster?.memberIds || [])if(!members[String(id)])members[String(id)]={};
+    const options=Object.keys(members).sort((a,b)=>memberLabel(a).localeCompare(memberLabel(b))).map(id=>`<option value="${escapeAttr(id)}">${escapeHtml(memberLabel(id))}</option>`).join('');
+    body.innerHTML=`<div class="blom-toolbar"><label>Member<select id="blom-member-select">${options}</select></label></div><div id="blom-member-results"></div>`;
+    const select=body.querySelector('#blom-member-select');
+    if(selectedId && Object.hasOwn(members,selectedId))select.value=selectedId;
+    const render=()=>{
+      const id=select.value,context=memberScoreContext(members),{rows,unknown}=memberScoreRows(id,context);
+      rows.sort((a,b)=>(b.level || 0)-(a.level || 0) || b.cpr-a.cpr || a.crime.localeCompare(b.crime));
+      const groups=new Map();
+      for(const row of rows){if(!groups.has(row.crime))groups.set(row.crime,[]);groups.get(row.crime).push(row);}
+      const estimated=rows.filter(row=>row.kind==='Estimated').length,recorded=rows.length-estimated;
+      const evidence=row=>{
+        const detail=row.estimatedFrom,low=detail.rangeLow,high=detail.rangeHigh;
+        const range=Number.isFinite(low) && Number.isFinite(high)?`Empirical range ${low.toFixed(1)}–${high.toFixed(1)}%. `:'';
+        const error=Number.isFinite(detail.validationMae)?`Average validation error ${detail.validationMae.toFixed(1)} points. `:'';
+        const date=Number.isFinite(row.seen)?formatDate(new Date(row.seen).toISOString()):'undated';
+        return `<tr class="blom-member-estimate-evidence"><td colspan="3"><details><summary>Estimate evidence</summary><div>${escapeHtml(range+error)}${escapeHtml(detail.peerCount)} distinct paired peers. Source: ${escapeHtml(detail.crime)} / ${escapeHtml(prettyRole(detail.role))}, ${escapeHtml(formatCpr(detail.cpr))}. Oldest supporting reading: ${escapeHtml(date)}. ${detail.method==='validated-peer-regression'?'Validated model':'Small-sample provisional comparison'}. Real readings take priority.</div></details></td></tr>`;
+      };
+      body.querySelector('#blom-member-results').innerHTML=`<div class="blom-summary"><div>${memberLink(id)}</div><div>${groups.size} OCs · ${recorded} recorded role CPRs · ${estimated} estimated</div></div>
+        <p class="blom-member-evidence-note">Estimates are provisional monitoring figures. Script check-ins do not prove complete score coverage. ${unknown?`${unknown} role(s) remain without enough evidence. `:''}${!context.profiles.some(p=>String(p.user_id)===String(id))?'At least one dated personal measured score is needed for peer estimates. ':''}Real captured scores replace estimates after data refresh.</p>
+        ${rows.length?`<div class="blom-member-list">${[...groups].map(([crime,roles])=>`<section class="blom-member-crime"><h3 class="blom-member-crime-title">${roles[0].level?`L${roles[0].level}`:'—'} · ${escapeHtml(crime)}</h3><table class="blom-member-role-table" aria-label="${escapeAttr(crime)} role CPRs"><thead><tr><th scope="col">Role</th><th scope="col">CPR</th><th scope="col">Evidence</th></tr></thead><tbody>${roles.map(row=>`<tr class="${row.kind==='Estimated'?'blom-member-estimated':'blom-member-recorded'}"><th scope="row">${escapeHtml(prettyRole(row.role))}</th><td class="blom-member-score">${row.kind==='Estimated'?'~':''}${formatCpr(row.cpr)}</td><td class="blom-member-observed">${row.kind==='Estimated'?'<span class="blom-member-estimate-label">Estimated</span>':row.seen?`<span class="blom-member-row-date"><span class="blom-member-date-label">Observed </span>${formatDate(row.seen)}</span>`:'Recorded · undated'}</td></tr>${row.kind==='Estimated'?evidence(row):''}`).join('')}</tbody></table></section>`).join('')}</div>`:'<div class="blom-muted">No CPR records or supported estimates for this member.</div>'}`;
+    };
+    select.addEventListener('change',render);
+    if(select.value)render();
   }
 
   /*
@@ -9451,7 +9353,7 @@
       const id=String(member.id),observed=plannerObservation(id,slot.crime,slot.role,true),estimated=observed?null:plannerEstimatedRole(id,slot),match=plannerFit(id,slot,prefs);
       return {member_id:id,slot_key:slot.key,target:mainScriptTarget(slot.crime,slot.level,slot.weight,slot.roleCount,slot.role),level_floor:plannerLevelFloor(id,prefs),observed:observed?fit(observed):null,estimated:estimated?fit(estimated):null,eligible:!!match,owner:owners.get(slot.key) || null};
     }));
-    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.26'):'1.9.26',exported_at:new Date(now).toISOString(),
+    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.27'):'1.9.27',exported_at:new Date(now).toISOString(),
       snapshot:{...pick(state,['version','complete','shared','revision','scannedAt','scanStartedAt','factionId','viewerId']),
         members:(state.members || []).map(m=>({...pick(m,['id','name','is_in_oc','ocEligible']),status:pick(m.status,['state'])})),
         crimes:(state.crimes || []).map(crime=>({...pick(crime,['id','name','difficulty','status','isExpiring','ready_at','expired_at','pageScan','planningPhase','planningSecondsPerSlot','planningObservedAt']),slots:(crime.slots || []).map(slot=>({...pick(slot,['position','planningPercent','planningState']),position_info:pick(slot.position_info,['label']),user:slot.user===null?null:slot.user?pick(slot.user,['id','name']):undefined,item_requirement:pick(slot.item_requirement,['id'])}))})),
@@ -11672,9 +11574,38 @@
       }
       #${PANEL_ID} .blom-member-role-table .blom-member-row-date {
         color:#c0cbd2 !important; -webkit-text-fill-color:#c0cbd2 !important;
-        font-size:12px !important;
+        font-size:12px !important; background:transparent !important;
       }
       #${PANEL_ID} .blom-member-date-label { display:none !important; }
+      #${PANEL_ID} .blom-member-evidence-note {
+        margin:8px 0 !important; color:#cbd7df !important;
+        -webkit-text-fill-color:#cbd7df !important; background:#1c2226 !important;
+        padding:10px !important; border:1px solid #425865 !important;
+        font:400 13px/1.5 sans-serif !important; overflow-wrap:anywhere !important;
+      }
+      #${PANEL_ID} .blom-member-estimated .blom-member-score,
+      #${PANEL_ID} .blom-member-estimate-label {
+        color:#ffd48a !important; -webkit-text-fill-color:#ffd48a !important;
+        font-weight:700 !important;
+      }
+      #${PANEL_ID} .blom-member-estimate-label {
+        display:inline-block !important; background:#3c321c !important;
+        border:1px solid #8c7443 !important; border-radius:4px !important;
+        padding:2px 3px !important; font:700 11px/1.4 sans-serif !important;
+      }
+      #${PANEL_ID} .blom-member-estimate-evidence details { margin:0 !important; background:#1c2226 !important; }
+      #${PANEL_ID} .blom-member-estimate-evidence summary {
+        box-sizing:border-box !important; min-height:44px !important; padding:10px !important;
+        border:1px solid #526b7b !important; border-radius:5px !important;
+        background:#263d4a !important; color:#e8eef2 !important; -webkit-text-fill-color:#e8eef2 !important;
+        cursor:pointer !important; font:600 13px/1.5 sans-serif !important; overflow-wrap:anywhere !important;
+      }
+      #${PANEL_ID} .blom-member-estimate-evidence summary:hover { background:#345668 !important; }
+      #${PANEL_ID} .blom-member-estimate-evidence summary:focus-visible { outline:2px solid #9be1ff !important; outline-offset:2px !important; }
+      #${PANEL_ID} .blom-member-estimate-evidence details > div {
+        padding:10px !important; color:#cbd7df !important; -webkit-text-fill-color:#cbd7df !important;
+        background:#1c2226 !important; font:400 13px/1.5 sans-serif !important; overflow-wrap:anywhere !important;
+      }
       #${PANEL_ID} .blom-member-role-table tbody tr:last-child > * { border-bottom:0 !important; }
       @media(max-width:480px) {
         #${PANEL_ID} .blom-member-role-table th,
