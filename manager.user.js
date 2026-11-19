@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.30
+// @version      1.9.31
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -49,10 +49,15 @@
   function blSessionStored(key) {
     try { return blSessionKey(key) && sessionStorage.getItem('bl-mail-fallback:'+key)!==null; } catch (_) { return false; }
   }
+  function blManagerStorageKey(key) {
+    return key==='black-ledger-oc-planner-options-v1' ||
+      /^black-ledger-(?:planning-items|scope-bank)-v1:[1-9]\d*:[1-9]\d*$/.test(key) ||
+      /^black-ledger-workspace-sync-v1:[1-9]\d*:[1-9]\d*(?::conflict)?$/.test(key);
+  }
   function blStorageGet(key) {
     // Manager-private bookkeeping is shared by this userscript across its pages.
     // Never put helper-visible queues or sent receipts in private GM storage.
-    if(/^black-ledger-workspace-sync-v1:[1-9]\d*:[1-9]\d*(?::conflict)?$/.test(key) && typeof GM_getValue==='function') {
+    if(blManagerStorageKey(key) && typeof GM_getValue==='function') {
       const value=GM_getValue('bl-storage-fallback:'+key,null);if(typeof value==='string')return value;
     }
     if (blSessionKey(key)) {
@@ -61,27 +66,33 @@
     return localStorage.getItem(key);
   }
   function blStorageRemove(key) {
-    if(/^black-ledger-workspace-sync-v1:[1-9]\d*:[1-9]\d*(?::conflict)?$/.test(key)) {
-      try { if(typeof GM_getValue('bl-storage-fallback:'+key,null)==='string') {
-        GM_setValue('bl-storage-fallback:'+key,null);
-        if(GM_getValue('bl-storage-fallback:'+key,null)!==null)throw new Error('Workspace storage removal failed.');
-      } } catch(error) { if(typeof GM_getValue==='function')throw error; }
+    if(blManagerStorageKey(key) && typeof GM_getValue==='function' &&
+        typeof GM_getValue('bl-storage-fallback:'+key,null)==='string') {
+      // Remove the legacy copy first so it cannot reappear after clearing GM storage.
+      localStorage.removeItem(key);
+      GM_setValue('bl-storage-fallback:'+key,null);
+      if(GM_getValue('bl-storage-fallback:'+key,null)!==null)throw new Error('Manager storage removal failed.');
+      return;
     }
     if(blSessionKey(key))try{sessionStorage.removeItem('bl-mail-fallback:'+key);}catch(_){}
     localStorage.removeItem(key);
   }
 
   function blStorageSet(key, value) {
-    const privateKey=/^black-ledger-workspace-sync-v1:[1-9]\d*:[1-9]\d*(?::conflict)?$/.test(key);
+    const privateKey=blManagerStorageKey(key);
     const savePrivate=()=>{
       GM_setValue('bl-storage-fallback:'+key,value);
-      if(GM_getValue('bl-storage-fallback:'+key,null)!==value)throw new Error('Workspace storage write could not be verified.');
+      if(GM_getValue('bl-storage-fallback:'+key,null)!==value)throw new Error('Manager storage write could not be verified.');
       // Remove the old duplicate only after the durable replacement is verified.
       try{localStorage.removeItem(key);}catch(_){}
     };
     let privateStored=false;
     if(privateKey && typeof GM_getValue==='function')privateStored=typeof GM_getValue('bl-storage-fallback:'+key,null)==='string';
     if(privateStored){savePrivate();return;}
+    // Keep the potentially large, rebuildable item cache out of Torn's storage budget.
+    if(key.startsWith('black-ledger-planning-items-v1:') && privateKey) {
+      try { savePrivate();return; } catch (_) {}
+    }
     if(blSessionKey(key)) {
       try { if(sessionStorage.getItem('bl-mail-fallback:'+key)!==null) { sessionStorage.setItem('bl-mail-fallback:'+key,value);return; } } catch (_) {}
     }
@@ -106,7 +117,7 @@
     if(privateKey) {
       try { savePrivate();return; } catch (_) {}
     }
-    const record=privateKey?'workspace sync state':key==='black-ledger-oc-planner-options-v1'?'planner settings':key.startsWith('black-ledger-spawn-review-v1:')?'spawn review':key==='black-ledger-verified-roster-v1'?'membership verification':/^black-ledger-oc-pm-shared-v1:[1-9]\d*:[1-9]\d*$/.test(key)?'sent message history':key==='black-ledger-oc-newsletter-draft-v1'?'message draft':key==='black-ledger-oc-pm-queue-v1'?'message queue':'required local data';
+    const record=key.startsWith('black-ledger-workspace-sync-v1:')?'workspace sync state':key.startsWith('black-ledger-planning-items-v1:')?'planning item cache':key.startsWith('black-ledger-scope-bank-v1:')?'Scope balance':key==='black-ledger-oc-planner-options-v1'?'planner settings':key.startsWith('black-ledger-spawn-review-v1:')?'spawn review':key==='black-ledger-verified-roster-v1'?'membership verification':/^black-ledger-oc-pm-shared-v1:[1-9]\d*:[1-9]\d*$/.test(key)?'sent message history':key==='black-ledger-oc-newsletter-draft-v1'?'message draft':key==='black-ledger-oc-pm-queue-v1'?'message queue':'required local data';
     throw new Error('Device storage is full while saving '+record+'. OC data and message history have been preserved. This operation could not finish.');
   }
 
@@ -738,7 +749,14 @@
     // The shared service owns the snapshot; keep the accepted revision in memory.
     // No code reads a persistent duplicate, and saving it can exhaust PDA storage.
     plannerError='';
-    if(typeof prunePlanningItemsCache==='function')prunePlanningItemsCache(plannerState.crimes);
+    if(typeof prunePlanningItemsCache==='function'){
+      try { prunePlanningItemsCache(plannerState.crimes); }
+      catch (error) {
+        console.warn('[Black Ledger] Planning item cache:',error);
+        planningItemsReport={at:null,rows:[],crimes:0,error:String(error.message || error)};
+        planningItemsCards='';
+      }
+    }
   }
   async function refreshSharedPlanner(preferences=null) {
     if(sharedPlannerBusy)return;
