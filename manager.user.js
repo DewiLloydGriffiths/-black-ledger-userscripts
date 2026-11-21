@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.31
+// @version      1.9.32
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -5330,13 +5330,32 @@
   }
 
   function plannerSpawnSummaryCard(needed,state,plan,prefs,releaseStart=null,advanceBatch=null) {
+    // Show the action that comes before another Scope spend. These counts are
+    // recommendations/receipts, never evidence that a member actually joined.
+    if(!needed.trackingError){
+      const held=plan.mailedHeld || new Set();
+      const current=[...(plan.now || new Map())].filter(([id])=>!held.has(String(id)));
+      const future=[...(plan.next || new Map())].filter(([id])=>!held.has(String(id)));
+      const sent=[...(plan.now || new Map()),...(plan.next || new Map())].filter(([id])=>held.has(String(id))).length;
+      const quantity=(needed.groups || []).map(g=>`${g.count} × ${g.label}`).join(' · ');
+      const pending=current.length+future.length;
+      if(pending || sent){
+        let html='<strong>'+escapeHtml(pending?'Next: review '+pending+' existing-OC invitation'+(pending===1?'':'s'):'Next: check '+sent+' sent invitation'+(sent===1?'':'s'))+'</strong>';
+        html+='<p>'+escapeHtml(current.length+' unsent assignments for free members; '+future.length+' conditional assignments for future arrivals; '+sent+' sent invitations remain commitments.')+'</p>';
+        html+='<p>Open OC Manager → Roster Planner. Review existing assignments, choose “No more spawning for this plan → review messages”, then prepare and review invitations. Send only after checking the recipients and roles. Scan OCs again after members join.</p>';
+        if(quantity)html+='<p>'+escapeHtml('Additional starts to reassess afterwards: '+quantity+'. These use the remaining spare candidates; they are not a repeat of the OCs already scanned. Empty openings normally reserve only a starter and one follower, so other vacancies may remain.')+'</p>';
+        else if(needed.highStart || advanceBatch || releaseStart)html+='<p>A further start is being assessed. Review existing assignments first, then reassess its staffing, timing and Scope.</p>';
+        else html+='<p>No additional supported spawn quantity is shown.</p>';
+        return html;
+      }
+    }
     if(needed.highStart)return plannerHighStartCard(needed.highStart);
     if(advanceBatch)return '<strong>Spawn '+advanceBatch.count+' × '+escapeHtml(advanceBatch.label)+' ahead of crew releases</strong><p>Cost '+advanceBatch.totalCost+' Scope · '+advanceBatch.remainingScope+' remain · reserve '+advanceBatch.reserve+'. Some outcomes can use free members; others wait for verified crew releases, with first joins assessed by '+escapeHtml(new Date(advanceBatch.latestStartAt).toLocaleString('en-GB',{timeZone:'Europe/London',hour12:false}))+'. Staffing is conditional. Spawn this batch, then run Fresh shared scan to allocate the actual roles and check their countdowns before considering more.</p>';
     if(!needed.crews.length && !needed.trackingError && releaseStart)return '<strong>Wait for crew release — reassess one '+escapeHtml(releaseStart.label)+' start</strong><p>Earliest assessed start: '+escapeHtml(new Date(releaseStart.startAt).toLocaleString('en-GB',{timeZone:'Europe/London',hour12:false}))+'. Confirm completion, run Fresh shared scan and recheck Scope first. This forecast does not authorise spending or assign hypothetical roles.</p>';
     const decision=plannerSpawnQuantityDecision(needed,state,plan,prefs);
     const quantity=(needed.groups || []).map(g=>`${g.count} × ${g.label}`).join(' · ');
-    const title=needed.trackingError?'Wait — scan before spawning':needed.crews.length?(decision.allowed?'Spawn ':'Wait — ')+quantity:'No new OCs to spawn now';
-    const reason=needed.trackingError || (needed.crews.length && decision.allowed?'Spawn one, then Scan OCs. The remaining quantity updates after the scan.':needed.crews.length?decision.reason.split(/\.(?:\s|$)/)[0]+'.':needed.fulfilled?'The previous spawn request is covered.': 'No additional bracket has confirmed crew coverage.');
+    const title=needed.trackingError?'Wait — scan before spawning':needed.crews.length?(decision.allowed?'Additional starts available: ':'Wait — ')+quantity:'No new OCs to spawn now';
+    const reason=needed.trackingError || (needed.crews.length && decision.allowed?'These are additional starts from the remaining spare candidates after accounting for scanned OCs and reservations. Spawn only one, then Scan OCs and review the actual assignments before spending again. A new scan recalculates demand; it is not a countdown of your previous request.':needed.crews.length?decision.reason.split(/\.(?:\s|$)/)[0]+'.':needed.fulfilled?'The previous spawn request is covered.': 'No additional bracket has confirmed crew coverage.');
     return '<strong>'+escapeHtml(title)+'</strong><p>'+escapeHtml(reason)+'</p>';
   }
 
@@ -9485,7 +9504,7 @@
       const id=String(member.id),observed=plannerObservation(id,slot.crime,slot.role,true),estimated=observed?null:plannerEstimatedRole(id,slot),match=plannerFit(id,slot,prefs);
       return {member_id:id,slot_key:slot.key,target:mainScriptTarget(slot.crime,slot.level,slot.weight,slot.roleCount,slot.role),level_floor:plannerLevelFloor(id,prefs),observed:observed?fit(observed):null,estimated:estimated?fit(estimated):null,eligible:!!match,owner:owners.get(slot.key) || null};
     }));
-    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.30'):'1.9.30',exported_at:new Date(now).toISOString(),
+    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.32'):'1.9.32',exported_at:new Date(now).toISOString(),
       snapshot:{...pick(state,['version','complete','shared','revision','scannedAt','scanStartedAt','factionId','viewerId']),
         members:(state.members || []).map(m=>({...pick(m,['id','name','is_in_oc','ocEligible']),status:pick(m.status,['state'])})),
         crimes:(state.crimes || []).map(crime=>({...pick(crime,['id','name','difficulty','status','isExpiring','ready_at','expired_at','pageScan','planningPhase','planningSecondsPerSlot','planningObservedAt']),slots:(crime.slots || []).map(slot=>({...pick(slot,['position','planningPercent','planningState']),position_info:pick(slot.position_info,['label']),user:slot.user===null?null:slot.user?pick(slot.user,['id','name']):undefined,item_requirement:pick(slot.item_requirement,['id'])}))})),
