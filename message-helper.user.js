@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Message Helper
 // @namespace    https://www.torn.com/
-// @version      1.8.25
+// @version      1.8.26
 // @description  Prepare personal OC assignment messages from the Manager draft. Review and send each through Torn.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -306,13 +306,17 @@
             if (!placements[id].length) throw new Error('No assignment found for ' + byId[id] + ' [' + id + '].');
             var key = assignmentKey(placements[id]), previous = history.members[id];
             var unchanged = previous && previous.key === key, updated = previous && !unchanged;
-            var lines = ['Hi ' + byId[id] + ',', '', 'Your ' + (updated ? 'updated ' : '') + 'Black Ledger OC assignment' + (placements[id].length > 1 ? 's:' : ':')];
+            var future = d.messageScope === 'future';
+            var lines = ['Hi ' + byId[id] + ','];
+            if (updated) lines.push('', 'UPDATED ASSIGNMENT: This replaces my previous OC assignment message.');
+            if (future) lines.push('', 'FUTURE ASSIGNMENT: This is your next assignment. Wait until your current OC is complete before joining.');
+            lines.push('', 'Your ' + (updated ? 'updated ' : '') + 'Black Ledger OC assignment' + (placements[id].length > 1 ? 's:' : ':'));
             placements[id].forEach(function (p) {
               lines.push('', 'LEVEL ' + p.level + ' \u2014 ' + p.crime + ' (#' + p.crimeId + ')', 'Your role: ' + p.role);
             });
-            if (updated) lines.push('', 'This replaces my previous OC assignment message.');
-            lines.push('', d.messageScope === 'future' ? 'Once your current OC has finished, please join the assigned OC/role shown above. This is your next assignment; wait until your current OC is complete before joining.' : 'Please join the assigned OC/role when available.', '', 'Thanks!');
-            return {id:id,name:byId[id],title:'Black Ledger \u2014 ' + (updated ? 'Updated OC assignment' : 'Your OC assignment'),text:lines.join('\n'),assignments:placements[id],assignmentKey:key,updated:!!updated,status:unchanged ? 'skipped' : 'pending'};
+            if (!future) lines.push('', 'Please join the assigned OC/role when available.');
+            lines.push('', 'Thanks!');
+            return {id:id,name:byId[id],title:'Black Ledger \u2014 ' + (updated ? (future ? 'Updated future OC assignment' : 'Updated OC assignment') : (future ? 'Future OC assignment' : 'Your OC assignment')),text:lines.join('\n'),assignments:placements[id],assignmentKey:key,updated:!!updated,status:unchanged ? 'skipped' : 'pending'};
           });
           return {version:2,viewerId:r.viewerId,factionId:r.factionId,createdAt:Date.now(),expiresAt:Math.min(Number(d.expiresAt || Number(d.createdAt) + maxAge),Number(d.createdAt) + maxAge),draftCreatedAt:d.createdAt,spawnReviewSignature:d.spawnReviewSignature,items:items,activeId:null,openedAt:null};
         }

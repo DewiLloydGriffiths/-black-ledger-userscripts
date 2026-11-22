@@ -1,5 +1,5 @@
 {
-  "source_commit": "1c73fc00154f13d9fb40f89ba4b8f4ab2d70b2e5",
+  "source_commit": "18a11a26cb3012fac3dc2488ae9692e4909f8ebc",
   "scripts": [
     {
       "file": "manager.user.js",
@@ -16,8 +16,8 @@
     {
       "file": "message-helper.user.js",
       "greasyfork_id": "599035",
-      "version": "1.8.25",
-      "sha256": "f9c7ec36239a25ecbf0b9b6ed607f21185525a2f948a69f415d12370732b6b21"
+      "version": "1.8.26",
+      "sha256": "428242e96b02d236e344392c3016c2a8cce77205ea4e2dabdbe8f433427f5b44"
     }
   ]
 }
