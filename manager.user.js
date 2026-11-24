@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Black Ledger OC Manager
 // @namespace    https://www.torn.com/
-// @version      1.9.32
+// @version      1.9.33
 // @description  Leadership companion for Black Ledger OC Smart Role Targets. Planner with selectable crime levels, available-now assignments and spawn advice, with personal-message preparation. Launcher is restricted to OC pages; it also captures anonymous completed OC history.
 // @author       Black Ledger
 // @match        https://www.torn.com/factions.php*
@@ -3146,7 +3146,7 @@
     // from latest measured profiles, including newly collected destination CPR.
     const cache=plannerLearnedRole.cache || (plannerLearnedRole.cache=new WeakMap());
     if(!cache.has(state))cache.set(state,new Map());
-    const memo=cache.get(state),key=JSON.stringify([String(memberId),slot.crime,slot.role,slot.level]);
+    const memo=cache.get(state),key=JSON.stringify([String(memberId),slot.crime,slot.role,slot.level,displayOnly]);
     if(memo.has(key))return memo.get(key);
     const measured=p=>p?.kind==='Observed' && Number.isFinite(p.seen) && p.seen>0 && !p.stale && Number.isFinite(p.cpr) && p.cpr>=0 && p.cpr<=100;
     const peers=[...new Set((state.members || []).map(m=>String(m.id)))].filter(id=>id!==String(memberId));
@@ -3178,6 +3178,40 @@
       result={cpr,kind:'Estimated',seen,stale:false,confidence:'Provisional · validated peer model',
         source:`Learned provisional CPR ${cpr}% (conservative end of ${low.toFixed(1)}–${high.toFixed(1)} empirical range); ${best.peerCount} measured paired peers, ${best.mae.toFixed(1)}-point leave-one-member-out error; ${selected.length} measured source role(s). Real destination CPR replaces this estimate on the next fresh shared scan.`,
         estimatedFrom:{crime:best.crime,role:best.role,level:best.level,cpr:best.cpr,method:'validated-peer-regression',peerCount:best.peerCount,validationMae:best.mae,baselineMae:best.baselineMae,correlation:best.correlation,rangeLow:low,rangeHigh:high,anchorCount:selected.length,planningMargin:best.uncertainty}};
+    }
+    // Small cross-role samples are monitoring leads, never placement evidence.
+    // Use local measured offsets, not regression/extrapolation or chained guesses.
+    if(!result && displayOnly){
+      const bridges=[];
+      const base=role=>normalize(String(role).replace(/[\s#\d]+$/,''));
+      for(const [crime,def] of Object.entries(plannerWeights()))for(const role of Object.keys(def.roles || {})){
+        if(base(role)===base(slot.role))continue; // retain the established same-role comparison
+        const observed=plannerObservation(String(memberId),crime,role,false);
+        if(!measured(observed))continue;
+        const differences=[];let seen=observed.seen;
+        for(const {id,to} of destinations){
+          const from=plannerObservation(id,crime,role,false);
+          if(!measured(from) || Math.abs(from.cpr-observed.cpr)>10 || Math.abs(from.seen-to.seen)>7*86400000)continue;
+          differences.push(to.cpr-from.cpr);seen=Math.min(seen,from.seen,to.seen);
+        }
+        differences.sort((a,b)=>a-b);
+        const count=differences.length;
+        if(count<2 || differences.at(-1)-differences[0]>(count===2?3:10))continue;
+        const margin=count===2?6:4;
+        const low=Math.max(0,Math.min(100,observed.cpr+differences[0]-margin));
+        const high=Math.max(0,Math.min(100,observed.cpr+differences.at(-1)+margin));
+        bridges.push({crime,role,level:Number(def.level),cpr:observed.cpr,count,seen,low,high,margin,
+          prediction:observed.cpr+differences[Math.floor((count-1)*0.5)]});
+      }
+      // Disagreeing personal anchors leave the role unknown; never pick the best score.
+      if(bridges.length && Math.max(...bridges.map(b=>b.prediction))-Math.min(...bridges.map(b=>b.prediction))<=10){
+        bridges.sort((a,b)=>a.low-b.low || b.count-a.count || a.crime.localeCompare(b.crime) || a.role.localeCompare(b.role));
+        const best=bridges[0],low=Math.min(...bridges.map(b=>b.low)),high=Math.max(...bridges.map(b=>b.high));
+        const cpr=Math.floor(low*10)/10;
+        result={cpr,kind:'Estimated',seen:Math.min(...bridges.map(b=>b.seen)),stale:false,confidence:'Provisional · monitoring only',
+          source:`Monitoring comparison from ${best.crime} / ${best.role}: ${best.cpr}%; ${best.count} nearby measured paired peers. Empirical comparison range ${low.toFixed(1)}–${high.toFixed(1)}%, including a ${best.margin}-point small-sample margin; not a statistical confidence interval or role offer. Fresh real scores replace estimates and rebuild comparisons.`,
+          estimatedFrom:{crime:best.crime,role:best.role,level:best.level,cpr:best.cpr,method:'monitoring-peer-comparison',peerCount:best.count,rangeLow:low,rangeHigh:high,anchorCount:bridges.length,planningMargin:best.margin}};
+      }
     }
     memo.set(key,result);return result;
   }
@@ -3235,6 +3269,7 @@
   function plannerFit(id, slot, prefs, honourSentInvitation=false) {
     const observation = plannerObservation(id, slot.crime, slot.role, prefs.includeStale) ||
       ((slot.crimeId!=null || prefs.peerSpawn===true) && typeof plannerEstimatedRole==='function' ? plannerEstimatedRole(id,slot,prefs.peerSpawn===true) : null);
+    if(observation?.estimatedFrom?.method==='monitoring-peer-comparison')return null;
     const target = mainScriptTarget(slot.crime, slot.level, slot.weight, slot.roleCount, slot.role);
     // L8 uses the strongest available role fit, allowing a small shortfall.
     // Targets and recorded observations remain unchanged; larger gaps fail.
@@ -8065,7 +8100,7 @@
         const estimate=plannerEstimatedRole(String(id),{crime,role,level:Number(def.level)},true);
         // Fixed allowances are not learned figures. Only measured peer-backed
         // comparisons are shown in the monitoring view; no imaginary OC IDs.
-        if(!estimate || !['validated-peer-regression','paired-peers','lower-level-peer-trial'].includes(estimate.estimatedFrom?.method)){unknown++;continue;}
+        if(!estimate || !['validated-peer-regression','paired-peers','lower-level-peer-trial','monitoring-peer-comparison'].includes(estimate.estimatedFrom?.method)){unknown++;continue;}
         rows.push({crime,role,level:Number(def.level),...estimate});
       }
     }finally{plannerInputContext=previous;}
@@ -8096,8 +8131,8 @@
       for(const row of rows){if(!groups.has(row.crime))groups.set(row.crime,[]);groups.get(row.crime).push(row);}
       const estimated=rows.filter(row=>row.kind==='Estimated').length,recorded=rows.length-estimated;
       body.querySelector('#blom-member-results').innerHTML=`<div class="blom-summary"><div>${memberLink(id)}</div><div>${groups.size} OCs · ${recorded} recorded role CPRs · ${estimated} estimated</div></div>
-        <p class="blom-member-evidence-note">Estimates are provisional monitoring figures. Script check-ins do not prove complete score coverage. ${unknown?`${unknown} role(s) remain without enough evidence. `:''}${!context.profiles.some(p=>String(p.user_id)===String(id))?'At least one dated personal measured score is needed for peer estimates. ':''}Real captured scores replace estimates after data refresh.</p>
-        ${rows.length?`<div class="blom-member-list">${[...groups].map(([crime,roles])=>`<section class="blom-member-crime"><h3 class="blom-member-crime-title">${roles[0].level?`L${roles[0].level}`:'—'} · ${escapeHtml(crime)}</h3><table class="blom-member-role-table" aria-label="${escapeAttr(crime)} role CPRs"><thead><tr><th scope="col">Role</th><th scope="col">CPR</th><th scope="col">Evidence</th></tr></thead><tbody>${roles.map(row=>`<tr class="${row.kind==='Estimated'?'blom-member-estimated':'blom-member-recorded'}"><th scope="row">${escapeHtml(prettyRole(row.role))}</th><td class="blom-member-score">${row.kind==='Estimated'?'~':''}${formatCpr(row.cpr)}</td><td class="blom-member-observed">${row.kind==='Estimated'?'<span class="blom-member-estimate-label">Estimated</span>':row.seen?`<span class="blom-member-row-date"><span class="blom-member-date-label">Observed </span>${formatDate(row.seen)}</span>`:'Recorded · undated'}</td></tr>`).join('')}</tbody></table></section>`).join('')}</div>`:'<div class="blom-muted">No CPR records or supported estimates for this member.</div>'}`;
+        <p class="blom-member-evidence-note">Estimates are provisional monitoring figures. Script check-ins do not prove complete score coverage. ${unknown?`${unknown} role(s) remain without enough evidence. `:''}${!context.profiles.some(p=>String(p.user_id)===String(id))?'At least one dated personal measured score is needed for peer estimates. ':''}Small-sample cross-role estimates are monitoring only; ranges show peer variation plus a caution margin, not statistical confidence. Real captured scores replace estimates and update peer comparisons after data refresh.</p>
+        ${rows.length?`<div class="blom-member-list">${[...groups].map(([crime,roles])=>`<section class="blom-member-crime"><h3 class="blom-member-crime-title">${roles[0].level?`L${roles[0].level}`:'—'} · ${escapeHtml(crime)}</h3><table class="blom-member-role-table" aria-label="${escapeAttr(crime)} role CPRs"><thead><tr><th scope="col">Role</th><th scope="col">CPR</th><th scope="col">Evidence</th></tr></thead><tbody>${roles.map(row=>`<tr class="${row.kind==='Estimated'?'blom-member-estimated':'blom-member-recorded'}"><th scope="row">${escapeHtml(prettyRole(row.role))}</th><td class="blom-member-score">${row.kind==='Estimated'?'~':''}${formatCpr(row.cpr)}${row.estimatedFrom?.method==='monitoring-peer-comparison'?`<span class="blom-member-range">${row.estimatedFrom.rangeLow.toFixed(1)}–${row.estimatedFrom.rangeHigh.toFixed(1)}% · monitoring only</span>`:''}</td><td class="blom-member-observed">${row.kind==='Estimated'?'<span class="blom-member-estimate-label">Estimated</span>':row.seen?`<span class="blom-member-row-date"><span class="blom-member-date-label">Observed </span>${formatDate(row.seen)}</span>`:'Recorded · undated'}</td></tr>`).join('')}</tbody></table></section>`).join('')}</div>`:'<div class="blom-muted">No CPR records or supported estimates for this member.</div>'}`;
     };
     select.addEventListener('change',render);
     if(select.value)render();
@@ -9504,7 +9539,7 @@
       const id=String(member.id),observed=plannerObservation(id,slot.crime,slot.role,true),estimated=observed?null:plannerEstimatedRole(id,slot),match=plannerFit(id,slot,prefs);
       return {member_id:id,slot_key:slot.key,target:mainScriptTarget(slot.crime,slot.level,slot.weight,slot.roleCount,slot.role),level_floor:plannerLevelFloor(id,prefs),observed:observed?fit(observed):null,estimated:estimated?fit(estimated):null,eligible:!!match,owner:owners.get(slot.key) || null};
     }));
-    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.32'):'1.9.32',exported_at:new Date(now).toISOString(),
+    return {format:'black-ledger-planner-diagnostic-v1',manager_version:typeof GM_info!=='undefined'?String(GM_info.script?.version || '1.9.33'):'1.9.33',exported_at:new Date(now).toISOString(),
       snapshot:{...pick(state,['version','complete','shared','revision','scannedAt','scanStartedAt','factionId','viewerId']),
         members:(state.members || []).map(m=>({...pick(m,['id','name','is_in_oc','ocEligible']),status:pick(m.status,['state'])})),
         crimes:(state.crimes || []).map(crime=>({...pick(crime,['id','name','difficulty','status','isExpiring','ready_at','expired_at','pageScan','planningPhase','planningSecondsPerSlot','planningObservedAt']),slots:(crime.slots || []).map(slot=>({...pick(slot,['position','planningPercent','planningState']),position_info:pick(slot.position_info,['label']),user:slot.user===null?null:slot.user?pick(slot.user,['id','name']):undefined,item_requirement:pick(slot.item_requirement,['id'])}))})),
@@ -11737,6 +11772,12 @@
         -webkit-text-fill-color:#cbd7df !important; background:#1c2226 !important;
         padding:10px !important; border:1px solid #425865 !important;
         font:400 13px/1.5 sans-serif !important; overflow-wrap:anywhere !important;
+      }
+      #${PANEL_ID} .blom-member-range {
+        display:block !important; white-space:normal !important; overflow-wrap:anywhere !important;
+        font-size:11px !important; line-height:1.4 !important; font-weight:normal !important;
+        color:#f0d69d !important; -webkit-text-fill-color:#f0d69d !important;
+        background:transparent !important; border:0;
       }
       #${PANEL_ID} .blom-member-estimated .blom-member-score,
       #${PANEL_ID} .blom-member-estimate-label {
